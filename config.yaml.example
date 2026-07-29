@@ -1,0 +1,49 @@
+# RescueNet Emergency Response Agent (RERA) Configuration
+# =====================================================
+# Copy this file to config.yaml and fill in your values.
+# config.yaml is gitignored — never commit your real API key.
+
+# ── LLM ─────────────────────────────────────────────
+llm:
+  provider: deepseek
+  api_key: "YOUR_DEEPSEEK_API_KEY"       # ← Get yours at https://platform.deepseek.com/
+  model: deepseek-chat
+  base_url: https://api.deepseek.com/v1
+  fallback:
+    provider: qwen_local
+    model_path: ./models/qwen2.5-7b-instruct
+
+# ── ReAct Loop ──────────────────────────────────────
+react:
+  max_iterations: 10     # safety limit, prevent infinite loop
+  temperature: 0.7
+  max_tokens: 500
+
+# ── Ensemble Segmentation ───────────────────────────
+ensemble:
+  models:
+    - unet
+    - pspnet
+    - deeplabv3
+  confidence_lambda: 0.3   # entropy penalty weight
+  weight_dir: ./runs
+
+# ── Rescue Priority Weights ─────────────────────────
+priority_weights:
+  destroyed: 0.6           # Class 5 – 完全毁坏
+  major: 0.3               # Class 4 – 严重损坏
+  minor: 0.1               # Class 3 – 轻微损坏
+  road_blocked: 0.2        # Class 8 – 道路阻塞
+
+# ── Report Generation ───────────────────────────────
+report:
+  format: html             # html | markdown
+  include_visualization: true
+  top_k_priority_zones: 5
+  output_dir: ./output/reports
+
+# ── Agent Runtime ───────────────────────────────────
+agent:
+  use_mock: false          # set to true to demo without GPU / model weights
+  device: auto             # auto | cuda | cpu
+  batch_size: 1
