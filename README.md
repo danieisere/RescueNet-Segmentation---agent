@@ -196,29 +196,6 @@ ls runs/unet_final.pth runs/pspnet_final.pth runs/deeplabv3_final.pth
 > ```
 > 放置后运行 `python verify_dataset.py` 验证结构。数据集共 11 类、4,494 张高分辨率 UAV 航拍图像。
 
-### Phase 1: Agent基础框架（Week 1）✅ 已完成
-
-- [x] 创建`modules/agent/`目录结构
-- [x] 实现`BaseTool`抽象基类
-- [x] 实现`EnsembleSegmentationTool`（核心）
-- [x] 实现`StatisticsAnalyzerTool`
-- [x] 实现`PriorityCalculatorTool`
-- [x] 实现`ReportGeneratorTool`
-- [x] 实现`ReActController`
-- [x] 实现`agent_cli.py`入口脚本
-
-### Phase 2: 测试与优化（Week 2）
-
-- [ ] 单元测试各个Tool
-- [ ] 端到端测试ReAct循环
-- [ ] 性能优化（批量处理、缓存）
-- [ ] 错误处理和异常捕获
-
-### Phase 3: Web界面（Week 3，可选）
-
-- [ ] 实现`agent_web.py`（Streamlit）
-- [ ] 添加图像上传和结果展示
-- [ ] 交互式问答功能
 
 ---
 
