@@ -169,45 +169,16 @@ Final Answer: 根据分析，发现以下紧急情况：
 
 ---
 
-## 5. 实施计划
 
-### Phase 0: 模型训练（前置条件）⚠️
+## 5. 使用指南
 
-**必须先完成此步骤！**
-
-```bash
-# Step 1: 验证数据集
-python verify_dataset.py
-
-# Step 2: 训练模型（约2-3小时）
-python train.py
-
-# Step 3: 确认权重文件存在
-ls runs/unet_final.pth runs/pspnet_final.pth runs/deeplabv3_final.pth
-```
-
-> ⚠️ **数据集需自行下载**：RescueNet 不包含在本仓库中，请先前往 [BinaLab/RescueNet](https://github.com/BinaLab/RescueNet-A-High-Resolution-Post-Disaster-UAV-Dataset-for-Semantic-Segmentation) 下载，按以下结构放置：
-> ```
-> RescueNet/
-> ├── train/train-org-img/   # 训练原始图像
-> ├── train/train-label-img/ # 训练标签掩码
-> ├── test/test-org-img/     # 测试原始图像
-> └── test/test-label-img/   # 测试标签掩码
-> ```
-> 放置后运行 `python verify_dataset.py` 验证结构。数据集共 11 类、4,494 张高分辨率 UAV 航拍图像。
-
-
----
-
-## 6. 使用指南
-
-### 6.1 安装依赖
+### 5.1 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 6.2 配置DeepSeek API Key
+### 5.2 配置DeepSeek API Key
 
 复制配置文件模板并填入你的 API Key：
 
@@ -222,11 +193,22 @@ llm:
   api_key: "sk-your-deepseek-api-key-here"  # ← 替换为你的Key
 ```
 
-> ⚠️ `config.yaml` 已被 `.gitignore` 忽略，不会被提交到 Git。
 
 **获取API Key**: https://platform.deepseek.com/
 
-### 6.3 模型训练与评估流程
+### 5.3 模型训练与评估流程
+
+#### Step 0: 模型训练（前置条件）⚠️
+
+> ⚠️ **数据集需自行下载**：RescueNet 不包含在本仓库中，请先前往 [BinaLab/RescueNet](https://github.com/BinaLab/RescueNet-A-High-Resolution-Post-Disaster-UAV-Dataset-for-Semantic-Segmentation) 下载，按以下结构放置：
+> ```
+> RescueNet/
+> ├── train/train-org-img/   # 训练原始图像
+> ├── train/train-label-img/ # 训练标签掩码
+> ├── test/test-org-img/     # 测试原始图像
+> └── test/test-label-img/   # 测试标签掩码
+> ```
+> 放置后运行 `python verify_dataset.py` 验证结构。数据集共 11 类、4,494 张高分辨率 UAV 航拍图像。
 
 #### Step 1: 训练模型（必须先完成）
 
@@ -271,7 +253,6 @@ python test.py
 - ✅ 计算 Accuracy、mIoU、Focal Loss、Dice Loss 等指标
 - ✅ 生成对比表格，便于模型选择
 
----
 
 #### Step 3: 单图推理与可视化
 
@@ -308,7 +289,6 @@ python inference.py `
 - 彩色分割掩码图像保存到 `./output/` 目录
 - 如果提供标签，还会打印评估指标（Accuracy、mIoU等）
 
----
 
 #### Step 4: 运行应急响应智能体
 
@@ -326,7 +306,7 @@ python agent_cli.py \
 python agent_cli.py --image-folder ./test_images --mock
 ```
 
-
+---
 
 ## 7. 风险与应对
 
