@@ -44,6 +44,5 @@ report:
 
 # ── Agent Runtime ───────────────────────────────────
 agent:
-  use_mock: false          # set to true to demo without GPU / model weights
   device: auto             # auto | cuda | cpu
   batch_size: 1

@@ -11,6 +11,18 @@ import sys
 from typing import List
 
 
+def get_llm_api_key() -> str:
+    """从配置文件或标准环境变量读取 LLM API Key。"""
+    from configs.agent_config import LLM_CONFIG
+
+    return (
+        LLM_CONFIG.get('api_key')
+        or os.environ.get('DEEPSEEK_API_KEY')
+        or os.environ.get('OPENAI_API_KEY')
+        or ''
+    )
+
+
 def check_prerequisites() -> bool:
     """
     检查Agent运行的前置条件
@@ -21,41 +33,32 @@ def check_prerequisites() -> bool:
     print("🔍 检查Agent运行前置条件...")
     print("=" * 60)
     
-    # Check 1: 模型权重文件（如果不是Mock模式）
-    from configs.agent_config import AGENT_CONFIG
-    
-    if not AGENT_CONFIG['use_mock']:
-        required_weights = [
-            './runs/unet_final.pth',
-            './runs/pspnet_final.pth',
-            './runs/deeplabv3_final.pth'
-        ]
-        
-        missing_weights = [f for f in required_weights if not os.path.exists(f)]
-        
-        if missing_weights:
-            print("❌ 缺少模型权重文件:")
-            for f in missing_weights:
-                print(f"   - {f}")
-            print("\n💡 请先运行以下命令训练模型:")
-            print("   python train.py")
-            print("\n或者启用Mock模式（演示用）:")
-            print("   修改 configs/agent_config.py 中的 'use_mock': True")
-            return False
-        
-        print("✅ 模型权重文件齐全")
-    
-    else:
-        print("⚠️  Mock模式已启用（无需真实模型）")
+    # Check 1: 模型权重文件
+    from configs.agent_config import ENSEMBLE_CONFIG
+
+    required_weights = [
+        os.path.join(ENSEMBLE_CONFIG['weight_dir'], f'{model_name}_final.pth')
+        for model_name in ENSEMBLE_CONFIG['models']
+    ]
+    missing_weights = [f for f in required_weights if not os.path.exists(f)]
+
+    if missing_weights:
+        print("❌ 缺少模型权重文件:")
+        for f in missing_weights:
+            print(f"   - {f}")
+        print("\n💡 请先运行以下命令训练模型:")
+        print("   python train.py")
+        return False
+
+    print("✅ 模型权重文件齐全")
     
     # Check 2: DeepSeek API Key
-    from configs.agent_config import LLM_CONFIG
-    
-    if LLM_CONFIG['api_key'] == 'YOUR_DEEPSEEK_API_KEY':
-        print("⚠️  警告: DeepSeek API Key未配置")
-        print("   请编辑 configs/agent_config.py，设置正确的API Key")
-        print("   获取API Key: https://platform.deepseek.com/")
-        print("   或使用Mock模式跳过LLM调用")
+    api_key = get_llm_api_key()
+
+    if not api_key or api_key == 'YOUR_DEEPSEEK_API_KEY':
+        print("⚠️  警告: LLM API Key未配置")
+        print("   请在 config.yaml 中设置 llm.api_key，")
+        print("   或设置 DEEPSEEK_API_KEY / OPENAI_API_KEY 环境变量")
         return False
     
     print("✅ DeepSeek API Key已配置")
@@ -113,8 +116,6 @@ def main():
   # 指定输出文件名
   python agent_cli.py --image-folder ./images --output disaster_report.html
   
-  # Mock模式（无需真实模型）
-  python agent_cli.py --image-folder ./images --mock
         """
     )
     
@@ -125,8 +126,6 @@ def main():
                         help='用户问题（默认：分析这批灾区的损坏情况并生成救援建议）')
     parser.add_argument('--output', type=str, default=None,
                         help='输出报告文件名（默认：自动生成）')
-    parser.add_argument('--mock', action='store_true',
-                        help='启用Mock模式（无需真实模型，用于演示）')
     parser.add_argument('--skip-check', action='store_true',
                         help='跳过前置条件检查（不推荐）')
     
@@ -136,12 +135,6 @@ def main():
     if not args.skip_check:
         if not check_prerequisites():
             sys.exit(1)
-    
-    # 启用Mock模式
-    if args.mock:
-        from configs.agent_config import AGENT_CONFIG
-        AGENT_CONFIG['use_mock'] = True
-        print("⚠️  Mock模式已启用\n")
     
     # 批量处理图像
     try:
@@ -158,12 +151,8 @@ def main():
         PriorityCalculatorTool,
         ReportGeneratorTool
     )
-    from configs.agent_config import AGENT_CONFIG
-    
-    use_mock = AGENT_CONFIG['use_mock']
-    
     tools = {
-        'ensemble_segment': EnsembleSegmentationTool(use_mock=use_mock),
+        'ensemble_segment': EnsembleSegmentationTool(),
         'analyze_statistics': StatisticsAnalyzerTool(),
         'calculate_priority': PriorityCalculatorTool(),
         'generate_report': ReportGeneratorTool(),
@@ -173,11 +162,9 @@ def main():
     
     # 初始化ReAct控制器
     from modules.agent.react_controller import ReActController
-    from configs.agent_config import LLM_CONFIG
-    
     controller = ReActController(
         tools=tools,
-        api_key=LLM_CONFIG['api_key']
+        api_key=get_llm_api_key()
     )
     
     # 执行Agent

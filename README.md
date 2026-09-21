@@ -302,8 +302,6 @@ python agent_cli.py \
     --question "哪些区域的建筑物损坏最严重？应该优先派遣什么资源？" \
     --output critical_areas_report.html
 
-# Mock模式（演示用，无需真实模型）
-python agent_cli.py --image-folder ./test_images --mock
 ```
 
 ---

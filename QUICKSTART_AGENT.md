@@ -37,25 +37,7 @@ llm:
 
 ---
 
-### Step 3: 选择运行模式
-
-#### 模式A: Mock模式（演示用，无需训练模型）
-
-```bash
-# 直接运行，无需训练模型
-python agent_cli.py --image-folder ./RescueNet/test/test-org-img --mock
-```
-
-**适用场景**: 
-- ✅ 快速演示Agent架构
-- ✅ 测试ReAct循环逻辑
-- ✅ 验证报告生成功能
-
-**注意**: Mock模式使用随机数据，不反映真实分割结果。
-
----
-
-#### 模式B: 真实模式（需要训练模型）
+### Step 3: 准备并运行模型
 
 **Step 3.1: 下载数据集并训练模型（约2-3小时）**
 
@@ -107,11 +89,6 @@ python agent_cli.py \
     --image-folder ./images \
     --output my_disaster_report.html
 
-# Mock模式
-python agent_cli.py \
-    --image-folder ./images \
-    --mock
-
 # 跳过前置检查（不推荐）
 python agent_cli.py \
     --image-folder ./images \
@@ -122,12 +99,12 @@ python agent_cli.py \
 
 ## 🎬 预期输出示例
 
-### Mock模式输出
+### 输出示例
 
 ```
 🔍 检查Agent运行前置条件...
 ============================================================
-⚠️  Mock模式已启用（无需真实模型）
+✅ 模型权重文件齐全
 ✅ DeepSeek API Key已配置
 ============================================================
 ✅ 所有前置条件满足，可以启动Agent！
@@ -194,16 +171,9 @@ python agent_cli.py \
 
 ### Q1: 提示"缺少模型权重文件"？
 
-**A**: 你有两个选择：
-
-**选项1**: 训练模型（推荐）
+**A**: 运行训练脚本生成所需权重：
 ```bash
 python train.py
-```
-
-**选项2**: 使用Mock模式
-```bash
-python agent_cli.py --image-folder ./images --mock
 ```
 
 ---
@@ -214,8 +184,6 @@ python agent_cli.py --image-folder ./images --mock
 1. API Key是否正确配置
 2. 网络连接是否正常
 3. API余额是否充足
-
-或使用Mock模式跳过LLM调用。
 
 ---
 

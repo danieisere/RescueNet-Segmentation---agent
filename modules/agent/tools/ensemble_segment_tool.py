@@ -5,7 +5,6 @@ Ensemble分割工具
 """
 import os
 import torch
-import numpy as np
 import torch.nn.functional as F
 from typing import Dict, Any
 
@@ -23,19 +22,11 @@ class EnsembleSegmentationTool(BaseTool):
     - 采用"评分最高者胜出"策略，自动选择最可靠的预测结果
     """
     
-    def __init__(self, use_mock: bool = False):
-        """
-        初始化工具
-        
-        Args:
-            use_mock: 是否使用Mock模式（演示用，无需真实模型）
-        """
-        self.use_mock = use_mock
+    def __init__(self):
+        """初始化工具并加载分割模型。"""
         self.models = {}
-        
-        if not use_mock:
-            self._verify_weights()
-            self._load_models()
+        self._verify_weights()
+        self._load_models()
     
     @property
     def name(self) -> str:
@@ -61,36 +52,7 @@ class EnsembleSegmentationTool(BaseTool):
                 'image_path': str            # 输入图像路径
             }
         """
-        # Mock模式：返回假数据（用于演示Agent流程）
-        if self.use_mock:
-            return self._mock_execute(image_path)
-        
-        # 正常模式：调用真实模型
         return self._real_execute(image_path)
-    
-    def _mock_execute(self, image_path: str) -> Dict[str, Any]:
-        """模拟分割结果（无需真实模型，用于演示）"""
-        # 生成随机分割掩码（11个类别）
-        fake_mask = np.random.randint(0, 11, size=(768, 768))
-        
-        # 模拟评分
-        scores = {
-            'unet': round(np.random.uniform(0.75, 0.90), 3),
-            'pspnet': round(np.random.uniform(0.70, 0.88), 3),
-            'deeplabv3': round(np.random.uniform(0.72, 0.92), 3)
-        }
-        
-        best_model = max(scores, key=scores.get)
-        
-        print(f"[MOCK] Ensemble分割完成 | 最佳模型: {best_model} | 评分: {scores}")
-        
-        return {
-            'best_model': best_model,
-            'best_mask': fake_mask,
-            'scores': scores,
-            'all_predictions': {},
-            'image_path': image_path
-        }
     
     def _real_execute(self, image_path: str) -> Dict[str, Any]:
         """真实分割逻辑"""
