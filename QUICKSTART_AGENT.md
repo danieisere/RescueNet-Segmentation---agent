@@ -5,7 +5,7 @@
 ### Step 1: 安装依赖（1分钟）
 
 ```bash
-pip install torch torchvision opencv-python albumentations matplotlib tqdm tabulate Pillow openai jinja2 weasyprint
+pip install torch torchvision opencv-python albumentations matplotlib tqdm tabulate Pillow openai python-dotenv jinja2 weasyprint
 ```
 
 或者使用requirements.txt：
@@ -16,24 +16,24 @@ pip install -r requirements.txt
 
 ---
 
-### Step 2: 配置DeepSeek API Key（1分钟）
+### Step 2: 配置 LLM API Key（1分钟）
 
-1. 注册DeepSeek账号: https://platform.deepseek.com/
-2. 获取API Key
-3. 复制配置模板并填入 Key:
+1. 从 `config.yaml` 中配置的 LLM 服务商获取 API Key
+2. 确认 `llm.api_key_env` 是要使用的环境变量名
+3. 复制配置和环境变量模板：
 
 ```bash
 cp config.yaml.example config.yaml
+cp .env.example .env
 ```
 
-编辑 `config.yaml`:
+编辑 `.env`，填入与 `config.yaml` 中 `llm.api_key_env` 对应的 Key：
 
-```yaml
-llm:
-  api_key: "sk-your-deepseek-api-key-here"  # ← 替换为你的Key
+```dotenv
+CODEXCN_API_KEY=your_codexcn_api_key_here
 ```
 
-> ⚠️ `config.yaml` 已 gitignore，不会被提交到 GitHub。
+> ⚠️ `.env` 和 `config.yaml` 均已 gitignore，不会被提交到 GitHub。
 
 ---
 

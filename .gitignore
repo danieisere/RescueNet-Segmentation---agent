@@ -58,6 +58,7 @@ data/raw/*/
 
 # Configuration (contains API keys — never commit)
 config.yaml
+.env
 
 # RescueNet Dataset (download separately)
 RescueNet/

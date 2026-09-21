@@ -9,12 +9,13 @@ ReAct控制器 - LLM驱动的智能体核心
 import ast
 import inspect
 import json
+import os
 import re
 from typing import Dict, Any, List
 
 from openai import OpenAI
 from modules.agent.base_tool import BaseTool
-from configs.agent_config import REACT_CONFIG, LLM_CONFIG
+from configs.agent_config import REACT_CONFIG, LLM_CONFIG, get_llm_api_key
 
 
 class ReActController:
@@ -37,10 +38,10 @@ class ReActController:
         
         Args:
             tools: 可用工具字典 {tool_name: tool_instance}
-            api_key: DeepSeek API Key，默认从配置读取
+            api_key: LLM API Key，默认从配置或环境变量读取
         """
         self.tools = tools
-        self.api_key = api_key or LLM_CONFIG['api_key']
+        self.api_key = api_key or get_llm_api_key()
         
         # 初始化OpenAI客户端（DeepSeek兼容OpenAI SDK）
         self.client = OpenAI(
@@ -51,6 +52,40 @@ class ReActController:
         self.max_iterations = REACT_CONFIG['max_iterations']
         self.temperature = REACT_CONFIG['temperature']
         self.max_tokens = REACT_CONFIG['max_tokens']
+
+    def _call_llm(self, messages: List[Dict[str, str]]) -> str:
+        """Call the wire API selected by the LLM configuration."""
+        wire_api = LLM_CONFIG.get('wire_api', 'chat_completions')
+
+        if wire_api == 'responses':
+            request = {
+                'model': LLM_CONFIG['model'],
+                'input': messages,
+                'max_output_tokens': self.max_tokens,
+                'store': LLM_CONFIG.get('store', False),
+            }
+            reasoning_effort = LLM_CONFIG.get('reasoning_effort')
+            if reasoning_effort:
+                request['reasoning'] = {'effort': reasoning_effort}
+            verbosity = LLM_CONFIG.get('verbosity')
+            if verbosity:
+                request['text'] = {'verbosity': verbosity}
+            if LLM_CONFIG.get('supports_temperature', False):
+                request['temperature'] = self.temperature
+
+            response = self.client.responses.create(**request)
+            return response.output_text
+
+        request = {
+            'model': LLM_CONFIG['model'],
+            'messages': messages,
+            'max_tokens': self.max_tokens,
+        }
+        if LLM_CONFIG.get('supports_temperature', True):
+            request['temperature'] = self.temperature
+
+        response = self.client.chat.completions.create(**request)
+        return response.choices[0].message.content
     
     def run(self, user_query: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -77,6 +112,12 @@ class ReActController:
         
         reasoning_trace = []
         last_result_data = None
+        pipeline_state = {
+            'segmentation_results': {},
+            'statistics': None,
+            'priority': None,
+            'report': None,
+        }
         
         print("\n" + "="*60)
         print("🤖 Agent开始执行ReAct循环...")
@@ -87,14 +128,7 @@ class ReActController:
             
             # Step 1: 调用LLM
             try:
-                response = self.client.chat.completions.create(
-                    model=LLM_CONFIG['model'],
-                    messages=messages,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens
-                )
-                
-                llm_output = response.choices[0].message.content
+                llm_output = self._call_llm(messages)
                 
             except Exception as e:
                 error_msg = f"LLM调用失败: {str(e)}"
@@ -119,6 +153,20 @@ class ReActController:
             
             # Step 4: 检查是否是Final Answer
             if action == 'Final Answer':
+                missing_stages = self._missing_pipeline_stages(pipeline_state)
+                if missing_stages:
+                    observation_str = (
+                        "Error: 不能提前生成 Final Answer；尚未完成流水线阶段: "
+                        + ", ".join(missing_stages)
+                    )
+                    print(f"❌ {observation_str}")
+                    trace_step['status'] = 'failed'
+                    trace_step['error'] = observation_str
+                    reasoning_trace.append(trace_step)
+                    messages.append({"role": "assistant", "content": llm_output})
+                    messages.append({"role": "user", "content": f"Observation: {observation_str}"})
+                    continue
+
                 print(f"✅ Final Answer received")
                 print(f"\n{action_input}\n")
                 
@@ -128,7 +176,7 @@ class ReActController:
                 return {
                     'final_answer': action_input,
                     'reasoning_trace': reasoning_trace,
-                    'result_data': last_result_data
+                    'result_data': pipeline_state['report']
                 }
             
             # Step 5: 执行Tool
@@ -137,11 +185,18 @@ class ReActController:
                     raise ValueError(f"Unknown tool: {action}")
                 
                 # 解析Action Input并构建工具调用参数
-                action_input_dict = self._build_action_input_dict(action, action_input, last_result_data)
+                action_input_dict = self._build_action_input_dict(
+                    action,
+                    action_input,
+                    last_result_data,
+                    pipeline_state,
+                    context,
+                )
 
                 # 执行工具
                 observation = self.tools[action].execute(**action_input_dict)
-                observation_str = json.dumps(observation, ensure_ascii=False, default=str)[:1000]  # 限制长度
+                self._update_pipeline_state(action, observation, pipeline_state)
+                observation_str = self._summarize_observation(action, observation)
                 
                 print(f"📊 Observation: {observation_str[:200]}...")
                 
@@ -211,6 +266,8 @@ Final Answer: [你的最终回答，用自然语言总结分析结果和建议�
 **重要规则：**
 - 每次只执行一个Action
 - Action Input必须是有效的JSON格式
+- 工具之间的数据由系统自动传递；不要复制 Observation 中的结构化结果
+- 必须依次完成 ensemble_segment、analyze_statistics、calculate_priority、generate_report 后才能输出 Final Answer
 - Final Answer应该包含具体的数据、优先级排序和 actionable 的救援建议
 - 如果某个工具失败，尝试其他方法或说明局限性
 """
@@ -231,7 +288,12 @@ Final Answer: [你的最终回答，用自然语言总结分析结果和建议�
         
         # 提取Action
         action_match = re.search(r'Action:\s*([^\n]+)', llm_output)
-        action = action_match.group(1).strip() if action_match else "Final Answer"
+        if not action_match:
+            final_match = re.search(r'Final Answer:\s*(.*)', llm_output, re.DOTALL)
+            final_answer = final_match.group(1).strip() if final_match else llm_output.strip()
+            return thought, "Final Answer", final_answer
+
+        action = action_match.group(1).strip()
         
         # 提取Final Answer内容（如果是Final Answer）
         if action.lower().startswith('final'):
@@ -253,24 +315,66 @@ Final Answer: [你的最终回答，用自然语言总结分析结果和建议�
         
         if action_input_match:
             action_input_str = action_input_match.group(1).strip()
-            
-            # 尝试解析JSON或Python字面量
-            try:
-                action_input = json.loads(action_input_str)
-            except json.JSONDecodeError:
-                try:
-                    action_input = ast.literal_eval(action_input_str)
-                except (ValueError, SyntaxError):
-                    action_input = action_input_str
+            action_input = self._parse_action_input_value(action_input_str)
         else:
             action_input = ""
         
         return thought, action, action_input
 
-    def _build_action_input_dict(self, action: str, action_input: Any, last_result_data: Any) -> Dict[str, Any]:
+    @staticmethod
+    def _parse_action_input_value(action_input_str: str) -> Any:
+        """解析 Action Input 开头的第一个结构化值，忽略 LLM 追加的尾随文本。"""
+        try:
+            value, _ = json.JSONDecoder().raw_decode(action_input_str)
+            return value
+        except json.JSONDecodeError:
+            pass
+
+        try:
+            return ast.literal_eval(action_input_str)
+        except (ValueError, SyntaxError):
+            return action_input_str.splitlines()[0].strip()
+
+    def _build_action_input_dict(
+        self,
+        action: str,
+        action_input: Any,
+        last_result_data: Any,
+        pipeline_state: Dict[str, Any] = None,
+        context: Dict[str, Any] = None,
+    ) -> Dict[str, Any]:
         """
         将解析后的Action Input转换为工具可接受的参数字典。
         """
+        pipeline_state = pipeline_state or {
+            'segmentation_results': {},
+            'statistics': None,
+            'priority': None,
+            'report': None,
+        }
+        context = context or {}
+
+        # 大型工具结果始终通过内存状态传递，不接受 LLM 回传的文本副本。
+        if action == 'analyze_statistics':
+            seg_results = list(pipeline_state['segmentation_results'].values())
+            if not seg_results:
+                raise ValueError("缺少真实分割结果，请先调用 ensemble_segment")
+            return {'seg_results': seg_results}
+
+        if action == 'calculate_priority':
+            if pipeline_state['statistics'] is None:
+                raise ValueError("缺少统计结果，请先调用 analyze_statistics")
+            return {'stats_result': pipeline_state['statistics']}
+
+        if action == 'generate_report':
+            if pipeline_state['priority'] is None:
+                raise ValueError("缺少优先级结果，请先调用 calculate_priority")
+            result = {'priority_result': pipeline_state['priority']}
+            output_filename = self._normalize_output_filename(context.get('output_filename'))
+            if output_filename:
+                result['output_filename'] = output_filename
+            return result
+
         tool = self.tools[action]
         params = [
             p.name for p in inspect.signature(tool.execute).parameters.values()
@@ -279,12 +383,12 @@ Final Answer: [你的最终回答，用自然语言总结分析结果和建议�
 
         if isinstance(action_input, dict):
             result = action_input.copy()
-            return self._filter_tool_params(action, self._fill_missing_tool_params(action, result, last_result_data, params), params)
+            return self._filter_tool_params(action, result, params)
 
         if isinstance(action_input, list):
             if len(params) == 1:
                 result = {params[0]: action_input}
-                return self._filter_tool_params(action, self._fill_missing_tool_params(action, result, last_result_data, params), params)
+                return self._filter_tool_params(action, result, params)
             raise ValueError(f"工具 {action} 期望命名参数，但收到列表输入")
 
         if isinstance(action_input, str):
@@ -299,76 +403,91 @@ Final Answer: [你的最终回答，用自然语言总结分析结果和建议�
 
             if isinstance(parsed, dict):
                 result = parsed
-                return self._filter_tool_params(action, self._fill_missing_tool_params(action, result, last_result_data, params), params)
+                return self._filter_tool_params(action, result, params)
             if isinstance(parsed, list) and len(params) == 1:
                 result = {params[0]: parsed}
-                return self._filter_tool_params(action, self._fill_missing_tool_params(action, result, last_result_data, params), params)
+                return self._filter_tool_params(action, result, params)
             if len(params) == 1:
                 result = {params[0]: parsed}
-                return self._filter_tool_params(action, self._fill_missing_tool_params(action, result, last_result_data, params), params)
+                return self._filter_tool_params(action, result, params)
 
             result = {'raw_input': action_input}
-            return self._filter_tool_params(action, self._fill_missing_tool_params(action, result, last_result_data, params), params)
+            return self._filter_tool_params(action, result, params)
 
         if action_input is None:
             result = {}
-            return self._filter_tool_params(action, self._fill_missing_tool_params(action, result, last_result_data, params), params)
+            return self._filter_tool_params(action, result, params)
 
         if len(params) == 1:
             result = {params[0]: action_input}
-            return self._filter_tool_params(action, self._fill_missing_tool_params(action, result, last_result_data, params), params)
+            return self._filter_tool_params(action, result, params)
 
         result = {'raw_input': str(action_input)}
-        return self._filter_tool_params(action, self._fill_missing_tool_params(action, result, last_result_data, params), params)
+        return self._filter_tool_params(action, result, params)
 
-    def _fill_missing_tool_params(self, action: str, action_input_dict: Dict[str, Any], last_result_data: Any, params: List[str]) -> Dict[str, Any]:
-        """
-        如果Action Input中缺少必需参数，则尝试从上一步工具结果中补充。
-        """
-        if action == 'analyze_statistics':
-            # If caller didn't provide seg_results, try to fill from last_result_data
-            if 'seg_results' not in action_input_dict:
-                if isinstance(last_result_data, dict) and 'best_mask' in last_result_data:
-                    action_input_dict['seg_results'] = [last_result_data]
-                elif isinstance(last_result_data, dict) and 'per_image_stats' in last_result_data:
-                    action_input_dict['seg_results'] = last_result_data
-            else:
-                # If seg_results was provided but is a string representation (e.g. numpy dump),
-                # prefer using last_result_data when available to provide a real ndarray.
-                seg_val = action_input_dict.get('seg_results')
-                if isinstance(seg_val, str) and isinstance(last_result_data, dict) and 'best_mask' in last_result_data:
-                    action_input_dict['seg_results'] = [last_result_data]
+    def _update_pipeline_state(
+        self,
+        action: str,
+        observation: Dict[str, Any],
+        pipeline_state: Dict[str, Any],
+    ) -> None:
+        """保存工具的真实返回值，供后续工具直接使用。"""
+        if action == 'ensemble_segment':
+            pipeline_state['segmentation_results'][observation['image_path']] = observation
+        elif action == 'analyze_statistics':
+            pipeline_state['statistics'] = observation
+            pipeline_state['priority'] = None
+            pipeline_state['report'] = None
+        elif action == 'calculate_priority':
+            pipeline_state['priority'] = observation
+            pipeline_state['report'] = None
+        elif action == 'generate_report':
+            pipeline_state['report'] = observation
 
-        if action == 'calculate_priority':
-            if 'stats_result' not in action_input_dict:
-                if isinstance(last_result_data, dict) and 'per_image_stats' in last_result_data:
-                    action_input_dict['stats_result'] = last_result_data
-            else:
-                # Replace stringified stats_result with actual last_result_data when possible
-                stats_val = action_input_dict.get('stats_result')
-                if isinstance(stats_val, str) and isinstance(last_result_data, dict) and 'per_image_stats' in last_result_data:
-                    action_input_dict['stats_result'] = last_result_data
+    def _summarize_observation(self, action: str, observation: Dict[str, Any]) -> str:
+        """生成适合 LLM 的小型、无损业务语义摘要。"""
+        if action == 'ensemble_segment':
+            mask = observation['best_mask']
+            summary = {
+                'best_model': observation['best_model'],
+                'scores': observation['scores'],
+                'image_path': observation['image_path'],
+                'mask_shape': list(mask.shape),
+            }
+        else:
+            summary = observation
 
-        if action == 'generate_report':
-            if 'priority_result' not in action_input_dict:
-                if isinstance(last_result_data, dict) and 'priority_zones' in last_result_data:
-                    action_input_dict['priority_result'] = last_result_data
-            else:
-                # Replace stringified priority_result with actual last_result_data when possible
-                pr_val = action_input_dict.get('priority_result')
-                if isinstance(pr_val, str) and isinstance(last_result_data, dict) and 'priority_zones' in last_result_data:
-                    action_input_dict['priority_result'] = last_result_data
+        return json.dumps(summary, ensure_ascii=False, default=self._json_default)[:4000]
 
-        # 如果工具只有一个必需参数且未提供，则尝试用 last_result_data 补充
-        if len(params) == 1 and params[0] not in action_input_dict:
-            if params[0] == 'seg_results' and isinstance(last_result_data, dict) and 'best_mask' in last_result_data:
-                action_input_dict[params[0]] = [last_result_data]
-            elif params[0] == 'stats_result' and isinstance(last_result_data, dict) and 'per_image_stats' in last_result_data:
-                action_input_dict[params[0]] = last_result_data
-            elif params[0] == 'priority_result' and isinstance(last_result_data, dict) and 'priority_zones' in last_result_data:
-                action_input_dict[params[0]] = last_result_data
+    @staticmethod
+    def _json_default(value: Any) -> Any:
+        """将小型数值类型转为 JSON，拒绝把数组隐式转为摘要字符串。"""
+        if hasattr(value, 'item'):
+            return value.item()
+        raise TypeError(f"{type(value).__name__} is not JSON serializable")
 
-        return action_input_dict
+    @staticmethod
+    def _normalize_output_filename(output_filename: str) -> str:
+        if not output_filename:
+            return ''
+        filename = os.path.basename(output_filename)
+        stem, extension = os.path.splitext(filename)
+        if extension.lower() in {'.html', '.htm', '.md', '.markdown'}:
+            return stem
+        return filename
+
+    @staticmethod
+    def _missing_pipeline_stages(pipeline_state: Dict[str, Any]) -> List[str]:
+        stages = []
+        if not pipeline_state['segmentation_results']:
+            stages.append('ensemble_segment')
+        if pipeline_state['statistics'] is None:
+            stages.append('analyze_statistics')
+        if pipeline_state['priority'] is None:
+            stages.append('calculate_priority')
+        if pipeline_state['report'] is None:
+            stages.append('generate_report')
+        return stages
 
     def _filter_tool_params(self, action: str, action_input_dict: Dict[str, Any], params: List[str]) -> Dict[str, Any]:
         """

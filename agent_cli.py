@@ -11,18 +11,6 @@ import sys
 from typing import List
 
 
-def get_llm_api_key() -> str:
-    """从配置文件或标准环境变量读取 LLM API Key。"""
-    from configs.agent_config import LLM_CONFIG
-
-    return (
-        LLM_CONFIG.get('api_key')
-        or os.environ.get('DEEPSEEK_API_KEY')
-        or os.environ.get('OPENAI_API_KEY')
-        or ''
-    )
-
-
 def check_prerequisites() -> bool:
     """
     检查Agent运行的前置条件
@@ -52,16 +40,21 @@ def check_prerequisites() -> bool:
 
     print("✅ 模型权重文件齐全")
     
-    # Check 2: DeepSeek API Key
+    # Check 2: LLM API Key
+    from configs.agent_config import LLM_CONFIG, get_llm_api_key
+
     api_key = get_llm_api_key()
 
-    if not api_key or api_key == 'YOUR_DEEPSEEK_API_KEY':
+    if not api_key:
+        api_key_env = LLM_CONFIG.get('api_key_env', 'OPENAI_API_KEY')
+        if not api_key_env.isidentifier():
+            api_key_env = 'OPENAI_API_KEY'
         print("⚠️  警告: LLM API Key未配置")
         print("   请在 config.yaml 中设置 llm.api_key，")
-        print("   或设置 DEEPSEEK_API_KEY / OPENAI_API_KEY 环境变量")
+        print(f"   或设置 {api_key_env} 环境变量")
         return False
     
-    print("✅ DeepSeek API Key已配置")
+    print("✅ LLM API Key已配置")
     
     print("=" * 60)
     print("✅ 所有前置条件满足，可以启动Agent！\n")
@@ -162,6 +155,8 @@ def main():
     
     # 初始化ReAct控制器
     from modules.agent.react_controller import ReActController
+    from configs.agent_config import get_llm_api_key
+
     controller = ReActController(
         tools=tools,
         api_key=get_llm_api_key()
@@ -171,7 +166,8 @@ def main():
     context = {
         'image_folder': args.image_folder,
         'image_count': len(image_paths),
-        'image_list': image_paths[:5]  # 只传递前5张作为示例
+        'image_list': image_paths,
+        'output_filename': args.output,
     }
     
     print("="*60)

@@ -7,6 +7,11 @@ Priority:
 """
 import os
 import yaml
+from dotenv import load_dotenv
+
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv(os.path.join(PROJECT_ROOT, '.env'), override=False)
 
 
 def _find_config() -> str:
@@ -16,15 +21,14 @@ def _find_config() -> str:
         return env_path
 
     # Default: config.yaml next to project root
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    default = os.path.join(root, 'config.yaml')
+    default = os.path.join(PROJECT_ROOT, 'config.yaml')
     if os.path.isfile(default):
         return default
 
     raise FileNotFoundError(
         "Cannot find config.yaml.\n"
         "  1. Copy config.yaml.example → config.yaml\n"
-        "  2. Fill in your DeepSeek API key\n"
+        "  2. Create .env from .env.example and fill in your LLM API key\n"
         "  Or set RERA_CONFIG env var to point to your config file."
     )
 
@@ -46,3 +50,18 @@ ENSEMBLE_CONFIG  = _config['ensemble']
 PRIORITY_WEIGHTS = _config['priority_weights']
 REPORT_CONFIG    = _config['report']
 AGENT_CONFIG     = _config['agent']
+
+
+def get_llm_api_key() -> str:
+    """Resolve the LLM API key from config or a configured environment variable."""
+    configured_key = LLM_CONFIG.get('api_key')
+    if configured_key and configured_key != 'YOUR_DEEPSEEK_API_KEY':
+        return configured_key
+
+    api_key_env = LLM_CONFIG.get('api_key_env')
+    env_names = [api_key_env, 'DEEPSEEK_API_KEY', 'OPENAI_API_KEY']
+    for env_name in env_names:
+        if env_name and os.environ.get(env_name):
+            return os.environ[env_name]
+
+    return ''
