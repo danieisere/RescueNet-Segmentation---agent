@@ -77,9 +77,17 @@ class FakeReportTool:
             'summary': 'done',
         }
 
-    def execute(self, priority_result, output_filename=None):
+    def execute(
+        self,
+        priority_result,
+        output_filename=None,
+        segmentation_result=None,
+        statistics_result=None,
+    ):
         self.received = priority_result
         self.output_filename = output_filename
+        self.segmentation_result = segmentation_result
+        self.statistics_result = statistics_result
         return self.result
 
 
@@ -124,8 +132,7 @@ class ReActPipelineTests(unittest.TestCase):
         result = controller.run(
             'question',
             {
-                'image_list': ['10782.jpg'],
-                'image_count': 1,
+                'image_path': '10782.jpg',
                 'output_filename': 'critical_areas_report.html',
             },
         )
@@ -133,6 +140,8 @@ class ReActPipelineTests(unittest.TestCase):
         self.assertIs(self.statistics.received[0], self.seg_result)
         self.assertIs(self.priority.received, self.statistics.result)
         self.assertIs(self.report.received, self.priority.result)
+        self.assertIs(self.report.segmentation_result, self.seg_result)
+        self.assertIs(self.report.statistics_result, self.statistics.result)
         self.assertEqual(self.report.output_filename, 'critical_areas_report')
         self.assertEqual(result['result_data']['report_path'], self.report.result['report_path'])
         self.assertEqual(result['final_answer'], 'verified answer')
@@ -148,7 +157,10 @@ class ReActPipelineTests(unittest.TestCase):
         ]
         controller = ScriptedController(self.tools, outputs)
 
-        result = controller.run('question', {'output_filename': 'report.html'})
+        result = controller.run(
+            'question',
+            {'image_path': '10782.jpg', 'output_filename': 'report.html'},
+        )
 
         self.assertEqual(result['reasoning_trace'][0]['status'], 'failed')
         self.assertIn('generate_report', result['reasoning_trace'][0]['error'])

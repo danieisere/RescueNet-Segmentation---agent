@@ -94,6 +94,45 @@ def batch_process_images(image_folder: str) -> List[str]:
     return image_paths
 
 
+def build_report_filename(image_path: str, requested_output: str, image_count: int) -> str:
+    """为每张图生成独立报告文件名，批量运行时避免相互覆盖。"""
+    image_stem = os.path.splitext(os.path.basename(image_path))[0]
+    if not requested_output:
+        return f'{image_stem}_report.html'
+
+    requested_name = os.path.basename(requested_output)
+    requested_stem, requested_ext = os.path.splitext(requested_name)
+    extension = requested_ext or '.html'
+    if image_count == 1:
+        return requested_stem + extension
+    return f'{requested_stem}_{image_stem}{extension}'
+
+
+def print_agent_result(result: dict, image_path: str) -> None:
+    """输出单张图像的 Agent 推理摘要与报告路径。"""
+    print("\n" + "=" * 60)
+    print(f"🤖 单图推理摘要: {os.path.basename(image_path)}")
+    print("=" * 60)
+
+    for step in result['reasoning_trace']:
+        status_icon = {
+            'completed': '✅',
+            'failed': '❌',
+            'pending': '⏳'
+        }.get(step['status'], '❓')
+        print(f"\n{status_icon} [Step {step['iteration'] + 1}]")
+        print(f"   Thought: {step['thought'][:100]}...")
+        print(f"   Action: {step['action']}")
+
+    print("\n" + "=" * 60)
+    print("📋 当前图像应急救援结论:")
+    print("=" * 60)
+    print(result['final_answer'])
+
+    if result['result_data'] and 'report_path' in result['result_data']:
+        print(f"\n✅ 单图报告已保存到: {result['result_data']['report_path']}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='🏗️ RescueNet应急响应智能体 (RERA)',
@@ -115,10 +154,10 @@ def main():
     parser.add_argument('--image-folder', type=str, required=True,
                         help='灾区图像文件夹路径或单张图像路径')
     parser.add_argument('--question', type=str, 
-                        default='分析这批灾区的损坏情况并生成救援建议',
-                        help='用户问题（默认：分析这批灾区的损坏情况并生成救援建议）')
+                        default='分析当前灾区图像的损坏情况并生成救援建议',
+                        help='用户问题（默认：分析当前灾区图像并生成救援建议）')
     parser.add_argument('--output', type=str, default=None,
-                        help='输出报告文件名（默认：自动生成）')
+                        help='单图报告文件名；批量模式会自动追加图片名')
     parser.add_argument('--skip-check', action='store_true',
                         help='跳过前置条件检查（不推荐）')
     
@@ -157,54 +196,33 @@ def main():
     from modules.agent.react_controller import ReActController
     from configs.agent_config import get_llm_api_key
 
-    controller = ReActController(
-        tools=tools,
-        api_key=get_llm_api_key()
+    results = []
+    for index, image_path in enumerate(image_paths, 1):
+        controller = ReActController(tools=tools, api_key=get_llm_api_key())
+        output_filename = build_report_filename(image_path, args.output, len(image_paths))
+        context = {
+            'image_path': image_path,
+            'image_id': os.path.basename(image_path),
+            'output_filename': output_filename,
+            'analysis_scope': 'single_image',
+        }
+
+        print("\n" + "=" * 60)
+        print(f"🖼️  单图分析 [{index}/{len(image_paths)}]: {os.path.basename(image_path)}")
+        print(f"📝 用户问题: {args.question}")
+        print("=" * 60 + "\n")
+
+        result = controller.run(args.question, context)
+        results.append(result)
+        print_agent_result(result, image_path)
+
+    successful_reports = sum(
+        1 for result in results
+        if result.get('result_data') and result['result_data'].get('report_path')
     )
     
-    # 执行Agent
-    context = {
-        'image_folder': args.image_folder,
-        'image_count': len(image_paths),
-        'image_list': image_paths,
-        'output_filename': args.output,
-    }
-    
-    print("="*60)
-    print(f"📝 用户问题: {args.question}")
-    print("="*60 + "\n")
-    
-    result = controller.run(args.question, context)
-    
-    # 输出结果
     print("\n" + "="*60)
-    print("🤖 Agent推理过程摘要:")
-    print("="*60)
-    
-    for step in result['reasoning_trace']:
-        status_icon = {
-            'completed': '✅',
-            'failed': '❌',
-            'pending': '⏳'
-        }.get(step['status'], '❓')
-        
-        print(f"\n{status_icon} [Step {step['iteration']+1}]")
-        print(f"   Thought: {step['thought'][:100]}...")
-        print(f"   Action: {step['action']}")
-    
-    print("\n" + "="*60)
-    print("📋 Final Answer:")
-    print("="*60)
-    print(result['final_answer'])
-    
-    # 如果有报告路径，显示
-    if result['result_data'] and 'report_path' in result['result_data']:
-        report_path = result['result_data']['report_path']
-        print(f"\n✅ 报告已保存到: {report_path}")
-        print(f"💡 提示: 在浏览器中打开查看完整报告")
-    
-    print("\n" + "="*60)
-    print("🎉 Agent执行完成！")
+    print(f"🎉 批量执行完成：{len(image_paths)} 张图像，生成 {successful_reports} 份独立报告！")
     print("="*60)
 
 

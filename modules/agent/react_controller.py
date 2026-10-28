@@ -169,6 +169,11 @@ class ReActController:
 
                 print(f"✅ Final Answer received")
                 print(f"\n{action_input}\n")
+
+                report_tool = self.tools.get('generate_report')
+                report_path = pipeline_state['report'].get('report_path') if pipeline_state['report'] else None
+                if report_tool and report_path and hasattr(report_tool, 'update_conclusion'):
+                    report_tool.update_conclusion(report_path, action_input)
                 
                 trace_step['status'] = 'completed'
                 reasoning_trace.append(trace_step)
@@ -266,9 +271,10 @@ Final Answer: [你的最终回答，用自然语言总结分析结果和建议�
 **重要规则：**
 - 每次只执行一个Action
 - Action Input必须是有效的JSON格式
+- 当前任务只分析 Context 中 image_path 指定的单张图像，不得进行跨图汇总或图像间排名
 - 工具之间的数据由系统自动传递；不要复制 Observation 中的结构化结果
 - 必须依次完成 ensemble_segment、analyze_statistics、calculate_priority、generate_report 后才能输出 Final Answer
-- Final Answer应该包含具体的数据、优先级排序和 actionable 的救援建议
+- Final Answer应该包含当前图像的具体数据、单图受灾等级和可执行的救援建议，该结论会写入当前图像报告
 - 如果某个工具失败，尝试其他方法或说明局限性
 """
     
@@ -355,6 +361,12 @@ Final Answer: [你的最终回答，用自然语言总结分析结果和建议�
         context = context or {}
 
         # 大型工具结果始终通过内存状态传递，不接受 LLM 回传的文本副本。
+        if action == 'ensemble_segment':
+            image_path = context.get('image_path')
+            if not image_path:
+                raise ValueError("缺少当前图像路径")
+            return {'image_path': image_path}
+
         if action == 'analyze_statistics':
             seg_results = list(pipeline_state['segmentation_results'].values())
             if not seg_results:
@@ -370,6 +382,11 @@ Final Answer: [你的最终回答，用自然语言总结分析结果和建议�
             if pipeline_state['priority'] is None:
                 raise ValueError("缺少优先级结果，请先调用 calculate_priority")
             result = {'priority_result': pipeline_state['priority']}
+            segmentation_results = pipeline_state['segmentation_results']
+            if not segmentation_results:
+                raise ValueError("缺少语义分割结果，请先调用 ensemble_segment")
+            result['segmentation_result'] = next(iter(segmentation_results.values()))
+            result['statistics_result'] = pipeline_state['statistics']
             output_filename = self._normalize_output_filename(context.get('output_filename'))
             if output_filename:
                 result['output_filename'] = output_filename

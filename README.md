@@ -293,7 +293,10 @@ python inference.py `
 #### Step 4: 运行应急响应智能体
 
 ```bash
-# 基本用法
+# 单图：生成一份单图灾情报告
+python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10782.jpg
+
+# 批量：每张图分别生成一份独立报告
 python agent_cli.py --image-folder ./RescueNet/test/test-org-img
 
 # 自定义问题
@@ -303,6 +306,8 @@ python agent_cli.py \
     --output critical_areas_report.html
 
 ```
+
+报告以单张航拍图为分析单位，包含该图的受灾等级、损坏类别占比、道路阻塞情况、应急救援结论，以及位于右上角的语义分割图。目录输入仅批量执行单图逻辑，不再生成跨图汇总报告。
 
 ---
 

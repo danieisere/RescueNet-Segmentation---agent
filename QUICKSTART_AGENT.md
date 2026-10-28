@@ -76,7 +76,10 @@ python agent_cli.py --image-folder ./RescueNet/test/test-org-img
 ### 基本用法
 
 ```bash
-# 默认问题
+# 单图：生成一份对应该图像的独立报告
+python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10782.jpg
+
+# 批量：对目录内每张图分别执行单图流程并生成独立报告
 python agent_cli.py --image-folder ./RescueNet/test/test-org-img
 
 # 自定义问题
@@ -84,7 +87,7 @@ python agent_cli.py \
     --image-folder ./images \
     --question "哪些区域建筑物损坏最严重？"
 
-# 指定输出文件名
+# 指定报告文件名；批量时会自动追加图片名避免覆盖
 python agent_cli.py \
     --image-folder ./images \
     --output my_disaster_report.html
@@ -175,6 +178,8 @@ python agent_cli.py \
 ```bash
 python train.py
 ```
+
+> 每份 HTML 报告只分析一张图像，右上角包含该图对应的语义分割图和关键类别图例。批量模式不会生成跨图汇总报告。
 
 ---
 
