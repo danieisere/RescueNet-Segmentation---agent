@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from typing import Dict, Any
 
 from modules.agent.base_tool import BaseTool
+from modules.agent.segmentation_visualization import build_segmentation_visualizations
 from configs.agent_config import ENSEMBLE_CONFIG, AGENT_CONFIG
 
 
@@ -49,7 +50,8 @@ class EnsembleSegmentationTool(BaseTool):
                 'best_mask': np.ndarray,     # 最佳分割掩码 (H, W)
                 'scores': Dict[str, float],  # 各模型置信度评分
                 'all_predictions': Dict,     # 所有模型的原始预测（用于分析）
-                'image_path': str            # 输入图像路径
+                'image_path': str,           # 输入图像路径
+                'visualizations': Dict,      # 三图 data URL、完整图例和尺寸映射（宽、高）
             }
         """
         return self._real_execute(image_path)
@@ -102,6 +104,10 @@ class EnsembleSegmentationTool(BaseTool):
         # Step 4: 选择评分最高的模型
         best_model = max(scores, key=scores.get)
         best_mask = torch.argmax(predictions[best_model], dim=1).squeeze(0).cpu().numpy()
+
+        # 使用本次推理读取的 RGB 原图生成三图，避免再次读取文件导致来源不一致。
+        # 可视化映射回原图尺寸；best_mask 仍保留模型分辨率，供统计工具直接使用。
+        visualizations = build_segmentation_visualizations(raw_image, best_mask)
         
         print(f"[INFO] Ensemble分割完成 | 最佳模型: {best_model} | 评分: {scores}")
         
@@ -110,7 +116,8 @@ class EnsembleSegmentationTool(BaseTool):
             'best_mask': best_mask,
             'scores': scores,
             'all_predictions': predictions,
-            'image_path': image_path
+            'image_path': image_path,
+            'visualizations': visualizations,
         }
     
     def _calculate_confidence(self, output: torch.Tensor) -> float:

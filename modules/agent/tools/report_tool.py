@@ -4,13 +4,17 @@
 职责：基于优先级计算结果生成结构化的应急救援报告（HTML/PDF/Markdown）
 """
 import os
-import base64
-import io
 import re
 from datetime import datetime
 from typing import Dict, Any
 
 from modules.agent.base_tool import BaseTool
+from modules.agent.segmentation_visualization import (
+    build_segmentation_visualizations,
+    colorize_mask,
+    image_to_data_url,
+    segmentation_legend,
+)
 from configs.agent_config import REPORT_CONFIG
 
 
@@ -73,8 +77,12 @@ class ReportGeneratorTool(BaseTool):
         # 根据配置选择格式
         report_format = self.config['format']
         
-        original_image_data = self._build_original_image(segmentation_result)
-        visualization_data = self._build_segmentation_visualization(segmentation_result)
+        # 优先复用分割工具生成的三图，保证报告与后续模型输入的颜色、位置完全一致。
+        visualizations = self._build_visualizations(segmentation_result)
+        original_image_data = visualizations.get('original', '')
+        visualization_data = visualizations.get('segmentation', '')
+        overlay_data = visualizations.get('overlay', '')
+        legend = visualizations.get('legend', segmentation_legend())
 
         if report_format == 'html':
             report_path = self._generate_html(
@@ -83,9 +91,14 @@ class ReportGeneratorTool(BaseTool):
                 original_image_data,
                 visualization_data,
                 statistics_result,
+                overlay_data=overlay_data,
+                legend=legend,
             )
         elif report_format == 'markdown':
-            report_path = self._generate_markdown(priority_result, output_filename, visualization_data)
+            report_path = self._generate_markdown(
+                priority_result, output_filename, visualization_data,
+                original_image_data=original_image_data, overlay_data=overlay_data, legend=legend,
+            )
         else:
             raise ValueError(f"Unsupported format: {report_format}")
         
@@ -206,47 +219,36 @@ class ReportGeneratorTool(BaseTool):
         close_list()
         return ''.join(output)
 
-    def _build_segmentation_visualization(self, segmentation_result: Dict[str, Any] = None) -> str:
-        """将类别掩膜编码为可嵌入 HTML 的 PNG data URI。"""
+    def _build_visualizations(self, segmentation_result: Dict[str, Any] = None) -> Dict[str, Any]:
+        """复用三图；旧结果没有该字段时，通过同一实现补齐，兼容既有调用。"""
         if not segmentation_result or segmentation_result.get('best_mask') is None:
-            return ''
+            return {}
+        if segmentation_result.get('visualizations'):
+            return segmentation_result['visualizations']
         try:
-            from PIL import Image
+            from PIL import Image, ImageOps
             import numpy as np
-            mask = np.asarray(segmentation_result['best_mask'], dtype=np.uint8)
-            palette = np.array([
-                [0, 0, 0], [40, 120, 220], [150, 150, 150], [255, 220, 0],
-                [255, 120, 0], [220, 0, 0], [180, 0, 180], [40, 180, 80],
-                [120, 70, 20], [0, 160, 80], [0, 220, 220],
-            ], dtype=np.uint8)
-            rgb = palette[np.clip(mask, 0, len(palette) - 1)]
-            image = Image.fromarray(rgb, mode='RGB')
-            buffer = io.BytesIO()
-            image.save(buffer, format='PNG', optimize=True)
-            encoded = base64.b64encode(buffer.getvalue()).decode('ascii')
-            return f'data:image/png;base64,{encoded}'
+            mask = segmentation_result['best_mask']
+            image_path = segmentation_result.get('image_path')
+            if image_path and os.path.isfile(image_path):
+                with Image.open(image_path) as image:
+                    # 对齐 OpenCV 默认读取的 EXIF 朝向，避免旧结果的叠加图发生旋转错位。
+                    original = np.array(ImageOps.exif_transpose(image).convert('RGB'))
+                return build_segmentation_visualizations(original, mask)
+            # 原图不可用时只展示已有掩膜，不生成没有真实底图的叠加结果。
+            return {'segmentation': image_to_data_url(colorize_mask(mask)),
+                    'legend': segmentation_legend()}
         except Exception as exc:
-            print(f"⚠️ 语义分割图生成失败: {exc}")
-            return ''
+            print(f"⚠️ 分割可视化生成失败: {exc}")
+            return {}
+
+    def _build_segmentation_visualization(self, segmentation_result: Dict[str, Any] = None) -> str:
+        """保留旧接口，统一使用共享配色生成分割图。"""
+        return self._build_visualizations(segmentation_result).get('segmentation', '')
 
     def _build_original_image(self, segmentation_result: Dict[str, Any] = None) -> str:
-        """读取原航拍图并编码为可独立携带的 data URI。"""
-        if not segmentation_result:
-            return ''
-        image_path = segmentation_result.get('image_path')
-        if not image_path or not os.path.isfile(image_path):
-            return ''
-        try:
-            from PIL import Image
-            with Image.open(image_path) as image:
-                image = image.convert('RGB')
-                buffer = io.BytesIO()
-                image.save(buffer, format='JPEG', quality=90, optimize=True)
-            encoded = base64.b64encode(buffer.getvalue()).decode('ascii')
-            return f'data:image/jpeg;base64,{encoded}'
-        except Exception as exc:
-            print(f"⚠️ 原航拍图嵌入失败: {exc}")
-            return ''
+        """保留旧接口，优先使用本次分割时读取的原航拍图。"""
+        return self._build_visualizations(segmentation_result).get('original', '')
 
     def _generate_html(
         self,
@@ -255,6 +257,8 @@ class ReportGeneratorTool(BaseTool):
         original_image_data: str = '',
         visualization_data: str = '',
         statistics_result: Dict = None,
+        overlay_data: str = '',
+        legend: list = None,
     ) -> str:
         """生成HTML格式报告"""
         from jinja2 import Template
@@ -276,6 +280,8 @@ class ReportGeneratorTool(BaseTool):
             include_visualization=self.config['include_visualization'],
             original_image=original_image_data,
             segmentation_visualization=visualization_data,
+            overlay_visualization=overlay_data,
+            segmentation_legend=legend if legend is not None else segmentation_legend(),
         )
         
         # 保存文件
@@ -285,11 +291,23 @@ class ReportGeneratorTool(BaseTool):
         
         return report_path
     
-    def _generate_markdown(self, priority_result: Dict, filename: str, visualization_data: str = '') -> str:
+    def _generate_markdown(
+        self, priority_result: Dict, filename: str, visualization_data: str = '',
+        original_image_data: str = '', overlay_data: str = '', legend: list = None,
+    ) -> str:
         """生成Markdown格式报告"""
         md_content = self._build_markdown_content(priority_result)
-        if visualization_data:
-            md_content = f"![语义分割图]({visualization_data})\n\n" + md_content
+        # Markdown 与 HTML 展示相同的三图和全类别图例。
+        images = [('原航拍图', original_image_data), ('语义分割图', visualization_data),
+                  ('原图与分割结果叠加图', overlay_data)]
+        image_sections = [f'![{title}]({data})' for title, data in images if data]
+        if image_sections:
+            legend = legend if legend is not None else segmentation_legend()
+            legend_lines = ['| 类别编号 | 类别 | 颜色（RGB） |', '|---|---|---|']
+            legend_lines.extend(
+                f"| {entry['class_id']} | {entry['name']} | {entry['hex']} |" for entry in legend
+            )
+            md_content = '\n\n'.join(image_sections + ['\n'.join(legend_lines), md_content])
         
         report_path = os.path.join(self.output_dir, f"{filename}.md")
         with open(report_path, 'w', encoding='utf-8') as f:
@@ -322,7 +340,8 @@ class ReportGeneratorTool(BaseTool):
         .report-header { margin-bottom: 24px; }
         .image-comparison { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; align-items: start; margin-top: 22px; }
         .report-image { min-width: 0; margin: 0; }
-        .report-image img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; border: 1px solid #bbb; background: #111; }
+        .report-image img { display: block; width: 100%; height: auto; object-fit: contain; border: 1px solid #bbb; background: #111; }
+        .overlay-visualization { grid-column: 1 / -1; }
         .mask-legend { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px 10px; margin-top: 8px; font-size: 0.78em; color: #444; }
         .swatch { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; }
         .agent-conclusion { background: #e8f4ff; border-left: 4px solid #1976d2; padding: 15px; margin: 20px 0; }
@@ -340,7 +359,7 @@ class ReportGeneratorTool(BaseTool):
     <div class="report-header">
         <h1>🏗️ {{ title }}</h1>
         <p><strong>生成时间:</strong> {{ generated_time }}</p>
-        {% if original_image or segmentation_visualization %}
+        {% if original_image or segmentation_visualization or overlay_visualization %}
         <div class="image-comparison">
             {% if original_image %}
             <figure class="report-image original-image">
@@ -351,13 +370,15 @@ class ReportGeneratorTool(BaseTool):
             <figure class="report-image segmentation-visualization">
                 <img src="{{ segmentation_visualization }}" alt="语义分割图">
                 <div class="mask-legend">
-                    <span><i class="swatch" style="background:#969696"></i>无损建筑</span>
-                    <span><i class="swatch" style="background:#ffdc00"></i>轻微损坏</span>
-                    <span><i class="swatch" style="background:#ff7800"></i>严重损坏</span>
-                    <span><i class="swatch" style="background:#dc0000"></i>完全毁坏</span>
-                    <span><i class="swatch" style="background:#28b450"></i>道路畅通</span>
-                    <span><i class="swatch" style="background:#784614"></i>道路阻塞</span>
+                    {% for entry in segmentation_legend %}
+                    <span><i class="swatch" style="background:{{ entry.hex }}"></i>{{ entry.class_id }} {{ entry.name }}</span>
+                    {% endfor %}
                 </div>
+            </figure>
+            {% endif %}
+            {% if overlay_visualization %}
+            <figure class="report-image overlay-visualization">
+                <img src="{{ overlay_visualization }}" alt="原图与分割结果叠加图">
             </figure>
             {% endif %}
         </div>
