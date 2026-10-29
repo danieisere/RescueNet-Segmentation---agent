@@ -19,6 +19,15 @@ react:
   temperature: 0.7
   max_tokens: 500
 
+# 多模态综合分析复用上方 LLM，所配置的模型和兼容服务必须支持图片输入。
+multimodal:
+  max_tokens: 4096       # 综合正文使用独立预算，避免沿用短调度输出上限
+  temperature: 0.3
+  timeout: 180           # 单次请求超时，单位为秒
+  image_detail: auto     # 图片细节级别：auto | low | high，默认由模型选择
+  max_image_side: 1536   # 仅限制传输图片长边，保持宽高比；0 表示发送原尺寸
+  max_attempts: 2        # JSON 结构不完整时最多尝试次数，硬上限为两次
+
 # ── Ensemble Segmentation ───────────────────────────
 ensemble:
   models:

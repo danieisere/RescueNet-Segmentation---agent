@@ -13,5 +13,6 @@ from configs.config_loader import (
     PRIORITY_WEIGHTS,
     REPORT_CONFIG,
     AGENT_CONFIG,
+    MULTIMODAL_CONFIG,
     get_llm_api_key,
 )

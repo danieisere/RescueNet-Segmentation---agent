@@ -181,12 +181,14 @@ def main():
         EnsembleSegmentationTool,
         StatisticsAnalyzerTool,
         PriorityCalculatorTool,
-        ReportGeneratorTool
+        ReportGeneratorTool,
+        MultimodalAnalysisTool,
     )
     tools = {
         'ensemble_segment': EnsembleSegmentationTool(),
         'analyze_statistics': StatisticsAnalyzerTool(),
         'calculate_priority': PriorityCalculatorTool(),
+        'multimodal_analyze': MultimodalAnalysisTool(),
         'generate_report': ReportGeneratorTool(),
     }
     
@@ -224,6 +226,10 @@ def main():
     print("\n" + "="*60)
     print(f"🎉 批量执行完成：{len(image_paths)} 张图像，生成 {successful_reports} 份独立报告！")
     print("="*60)
+
+    # API/分析失败必须反映在进程退出码中，避免自动化运行把失败误判为成功。
+    if any(result.get('status') == 'failed' for result in results):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

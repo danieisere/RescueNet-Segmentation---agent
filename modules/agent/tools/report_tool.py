@@ -4,6 +4,7 @@
 职责：基于优先级计算结果生成结构化的应急救援报告（HTML/PDF/Markdown）
 """
 import os
+import json
 import re
 from datetime import datetime
 from typing import Dict, Any
@@ -55,6 +56,7 @@ class ReportGeneratorTool(BaseTool):
         output_filename: str = None,
         segmentation_result: Dict[str, Any] = None,
         statistics_result: Dict[str, Any] = None,
+        analysis_result: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """
         生成应急救援报告
@@ -62,6 +64,7 @@ class ReportGeneratorTool(BaseTool):
         Args:
             priority_result: PriorityCalculatorTool的输出
             output_filename: 输出文件名（不含扩展名），默认自动生成
+            analysis_result: 已完成的多模态分析，正文直接复用并保存为独立 JSON
         
         Returns:
             {
@@ -70,6 +73,20 @@ class ReportGeneratorTool(BaseTool):
                 'summary': str           # 报告摘要文本
             }
         """
+        if analysis_result is not None:
+            if analysis_result.get('status') != 'completed' or not analysis_result.get('conclusion'):
+                raise ValueError('不能使用未完成的多模态结论生成报告')
+            if not segmentation_result or os.path.normcase(os.path.abspath(analysis_result['image_path'])) != os.path.normcase(os.path.abspath(segmentation_result['image_path'])):
+                raise ValueError('多模态结论与报告图像不一致')
+            # 图像相同也可能已重算；独立调用报告时仍需验证分析采用的真实上游版本。
+            if not statistics_result:
+                raise ValueError('多模态报告缺少统计依据')
+            expected_source = json.loads(json.dumps({
+                'statistics': statistics_result['per_image_stats'][0],
+                'priority': priority_result['priority_zones'][0],
+            }, allow_nan=False))
+            if analysis_result.get('source_data') != expected_source:
+                raise ValueError('综合分析与当前报告的统计或优先级结果不一致')
         if output_filename is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_filename = f"emergency_report_{timestamp}"
@@ -93,15 +110,25 @@ class ReportGeneratorTool(BaseTool):
                 statistics_result,
                 overlay_data=overlay_data,
                 legend=legend,
+                has_multimodal_analysis=analysis_result is not None,
             )
         elif report_format == 'markdown':
             report_path = self._generate_markdown(
                 priority_result, output_filename, visualization_data,
                 original_image_data=original_image_data, overlay_data=overlay_data, legend=legend,
+                has_multimodal_analysis=analysis_result is not None,
             )
         else:
             raise ValueError(f"Unsupported format: {report_format}")
         
+        analysis_path = None
+        if analysis_result is not None:
+            # 同一份正文写入报告与返回结果；结构化结果单独保存，方便复核和后续节点复用。
+            self.update_conclusion(report_path, analysis_result['conclusion'])
+            analysis_path = os.path.splitext(report_path)[0] + '.analysis.json'
+            with open(analysis_path, 'w', encoding='utf-8') as file:
+                json.dump(analysis_result, file, ensure_ascii=False, indent=2, allow_nan=False)
+
         # 生成摘要
         summary = self._extract_summary(priority_result)
         
@@ -112,6 +139,7 @@ class ReportGeneratorTool(BaseTool):
             'format': report_format,
             'summary': summary,
             'image_path': segmentation_result.get('image_path') if segmentation_result else None,
+            'analysis_path': analysis_path,
         }
 
     def update_conclusion(self, report_path: str, conclusion: str) -> None:
@@ -259,6 +287,7 @@ class ReportGeneratorTool(BaseTool):
         statistics_result: Dict = None,
         overlay_data: str = '',
         legend: list = None,
+        has_multimodal_analysis: bool = False,
     ) -> str:
         """生成HTML格式报告"""
         from jinja2 import Template
@@ -282,6 +311,7 @@ class ReportGeneratorTool(BaseTool):
             segmentation_visualization=visualization_data,
             overlay_visualization=overlay_data,
             segmentation_legend=legend if legend is not None else segmentation_legend(),
+            has_multimodal_analysis=has_multimodal_analysis,
         )
         
         # 保存文件
@@ -294,9 +324,10 @@ class ReportGeneratorTool(BaseTool):
     def _generate_markdown(
         self, priority_result: Dict, filename: str, visualization_data: str = '',
         original_image_data: str = '', overlay_data: str = '', legend: list = None,
+        has_multimodal_analysis: bool = False,
     ) -> str:
         """生成Markdown格式报告"""
-        md_content = self._build_markdown_content(priority_result)
+        md_content = self._build_markdown_content(priority_result, include_default_advice=not has_multimodal_analysis)
         # Markdown 与 HTML 展示相同的三图和全类别图例。
         images = [('原航拍图', original_image_data), ('语义分割图', visualization_data),
                   ('原图与分割结果叠加图', overlay_data)]
@@ -409,6 +440,7 @@ class ReportGeneratorTool(BaseTool):
         <tr><td>道路阻塞</td><td>{{ image_stats.class_counts.get(8, 0) }}</td><td>{{ "%.2f"|format(class_ratios.get(8, 0) * 100) }}%</td></tr>
     </table>
     
+    {% if not has_multimodal_analysis %}
     <h2>💡 救援建议</h2>
     <ol>
         <li><strong>搜救:</strong> 根据当前图像中的完全毁坏和严重损坏建筑比例配置搜索、破拆与生命探测力量。</li>
@@ -416,6 +448,7 @@ class ReportGeneratorTool(BaseTool):
         <li><strong>道路抢通:</strong> 对图中道路阻塞区域优先投入清障与工程保障力量。</li>
         <li><strong>现场核验:</strong> 结合无人机复拍和地面勘察确认分割结果，避免仅凭模型结果调度。</li>
     </ol>
+    {% endif %}
     
     <div class="footer">
         <p>本报告由 RescueNet Emergency Response Agent (RERA) 自动生成</p>
@@ -425,10 +458,18 @@ class ReportGeneratorTool(BaseTool):
 </html>
         """
     
-    def _build_markdown_content(self, priority_result: Dict) -> str:
+    def _build_markdown_content(self, priority_result: Dict, include_default_advice: bool = True) -> str:
         """构建Markdown内容"""
         zone = priority_result['priority_zones'][0]
         image_name = os.path.splitext(zone['image_id'])[0]
+        # 旧调用保留规则建议，多模态报告由正式综合结论提供建议，避免两套正文混杂。
+        advice = """## 💡 救援建议
+
+1. 根据当前图像中的建筑损坏情况配置搜救、破拆与生命探测力量。
+2. 在当前图像覆盖区域外缘设置伤员检伤与转运点。
+3. 对图中道路阻塞区域优先投入清障与工程保障力量。
+4. 结合无人机复拍和地面勘察核验模型结果。
+""" if include_default_advice else ''
         
         md = f"""# 🏗️ {image_name} 灾害应急响应报告
 
@@ -444,12 +485,7 @@ class ReportGeneratorTool(BaseTool):
 - 轻微损坏建筑像素: {zone['minor_damage_count']}
 - 道路阻塞占比: {zone['road_blocked_ratio'] * 100:.2f}%
 
-## 💡 救援建议
-
-1. 根据当前图像中的建筑损坏情况配置搜救、破拆与生命探测力量。
-2. 在当前图像覆盖区域外缘设置伤员检伤与转运点。
-3. 对图中道路阻塞区域优先投入清障与工程保障力量。
-4. 结合无人机复拍和地面勘察核验模型结果。
+{advice}
 
 ---
 

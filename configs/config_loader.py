@@ -51,6 +51,13 @@ PRIORITY_WEIGHTS = _config['priority_weights']
 REPORT_CONFIG    = _config['report']
 AGENT_CONFIG     = _config['agent']
 
+# 综合分析使用独立输出预算；旧配置无需增加新节即可运行。
+MULTIMODAL_CONFIG = {
+    'max_tokens': 4096, 'temperature': 0.3, 'timeout': 180,
+    'image_detail': 'auto', 'max_image_side': 1536, 'max_attempts': 2,
+    **_config.get('multimodal', {}),
+}
+
 
 def get_llm_api_key() -> str:
     """Resolve the LLM API key from config or a configured environment variable."""

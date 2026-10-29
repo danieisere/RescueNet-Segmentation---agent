@@ -11,16 +11,17 @@ import inspect
 import json
 import os
 import re
+from time import perf_counter
 from typing import Dict, Any, List
 
-from openai import OpenAI
+from modules.agent.llm_client import LLMClient
 from modules.agent.base_tool import BaseTool
-from configs.agent_config import REACT_CONFIG, LLM_CONFIG, get_llm_api_key
+from configs.agent_config import REACT_CONFIG, get_llm_api_key
 
 
 class ReActController:
     """
-    基于DeepSeek LLM的ReAct控制器
+    基于可配置 LLM 的 ReAct 控制器
     
     工作流程：
     1. 接收用户查询和上下文
@@ -43,49 +44,16 @@ class ReActController:
         self.tools = tools
         self.api_key = api_key or get_llm_api_key()
         
-        # 初始化OpenAI客户端（DeepSeek兼容OpenAI SDK）
-        self.client = OpenAI(
-            api_key=self.api_key,
-            base_url=LLM_CONFIG['base_url']
-        )
+        # 调度只使用文字上下文，图片分析由独立服务调用同一公共客户端实现。
+        self.llm_client = LLMClient(api_key=self.api_key)
         
         self.max_iterations = REACT_CONFIG['max_iterations']
         self.temperature = REACT_CONFIG['temperature']
         self.max_tokens = REACT_CONFIG['max_tokens']
 
-    def _call_llm(self, messages: List[Dict[str, str]]) -> str:
-        """Call the wire API selected by the LLM configuration."""
-        wire_api = LLM_CONFIG.get('wire_api', 'chat_completions')
-
-        if wire_api == 'responses':
-            request = {
-                'model': LLM_CONFIG['model'],
-                'input': messages,
-                'max_output_tokens': self.max_tokens,
-                'store': LLM_CONFIG.get('store', False),
-            }
-            reasoning_effort = LLM_CONFIG.get('reasoning_effort')
-            if reasoning_effort:
-                request['reasoning'] = {'effort': reasoning_effort}
-            verbosity = LLM_CONFIG.get('verbosity')
-            if verbosity:
-                request['text'] = {'verbosity': verbosity}
-            if LLM_CONFIG.get('supports_temperature', False):
-                request['temperature'] = self.temperature
-
-            response = self.client.responses.create(**request)
-            return response.output_text
-
-        request = {
-            'model': LLM_CONFIG['model'],
-            'messages': messages,
-            'max_tokens': self.max_tokens,
-        }
-        if LLM_CONFIG.get('supports_temperature', True):
-            request['temperature'] = self.temperature
-
-        response = self.client.chat.completions.create(**request)
-        return response.choices[0].message.content
+    def _call_llm(self, messages: List[Dict[str, Any]]) -> str:
+        """调度请求复用公共客户端，保持旧配置的温度与输出预算。"""
+        return self.llm_client.complete(messages, max_tokens=self.max_tokens, temperature=self.temperature)
     
     def run(self, user_query: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -102,6 +70,8 @@ class ReActController:
                 'result_data': Dict               # 最终的结构化数据（用于报告生成等）
             }
         """
+        # 将真实问题存入本次上下文，综合分析参数不接受调度模型的文本副本。
+        context = dict(context, user_query=user_query)
         # 构造System Prompt
         system_prompt = self._build_system_prompt()
         
@@ -116,6 +86,7 @@ class ReActController:
             'segmentation_results': {},
             'statistics': None,
             'priority': None,
+            'analysis': None,
             'report': None,
         }
         
@@ -134,8 +105,8 @@ class ReActController:
                 error_msg = f"LLM调用失败: {str(e)}"
                 print(f"❌ {error_msg}")
                 
-                # 如果LLM失败，使用规则引擎生成基础回答
-                return self._fallback_response(context, last_result_data)
+                # 调度失败时如实返回完成状态，不能声称未执行的工具已完成。
+                return self._incomplete_result(pipeline_state, reasoning_trace, 'llm_dispatch', error_msg)
             
             # Step 2: 解析LLM输出
             thought, action, action_input = self._parse_llm_response(llm_output)
@@ -167,6 +138,9 @@ class ReActController:
                     messages.append({"role": "user", "content": f"Observation: {observation_str}"})
                     continue
 
+                if pipeline_state.get('analysis'):
+                    return self._completed_result(pipeline_state, reasoning_trace)
+
                 print(f"✅ Final Answer received")
                 print(f"\n{action_input}\n")
 
@@ -185,6 +159,7 @@ class ReActController:
                 }
             
             # Step 5: 执行Tool
+            started = perf_counter()
             try:
                 if action not in self.tools:
                     raise ValueError(f"Unknown tool: {action}")
@@ -199,7 +174,12 @@ class ReActController:
                 )
 
                 # 执行工具
-                observation = self.tools[action].execute(**action_input_dict)
+                if action == 'multimodal_analyze' and pipeline_state.get('analysis') is not None:
+                    # 相同上游状态不重复付费分析；任何上游重算都会清除此缓存。
+                    observation = pipeline_state['analysis']
+                    trace_step['cached'] = True
+                else:
+                    observation = self.tools[action].execute(**action_input_dict)
                 self._update_pipeline_state(action, observation, pipeline_state)
                 observation_str = self._summarize_observation(action, observation)
                 
@@ -208,6 +188,7 @@ class ReActController:
                 # 更新状态
                 trace_step['status'] = 'completed'
                 trace_step['observation'] = observation_str
+                trace_step['elapsed_seconds'] = round(perf_counter() - started, 3)
                 
                 # 保存结果数据（用于后续步骤）
                 last_result_data = observation
@@ -218,8 +199,17 @@ class ReActController:
                 
                 trace_step['status'] = 'failed'
                 trace_step['error'] = str(e)
+                trace_step['elapsed_seconds'] = round(perf_counter() - started, 3)
+                if action == 'multimodal_analyze':
+                    # 失败时保留完整已执行状态，不能回退成声称已完成的纯统计报告。
+                    reasoning_trace.append(trace_step)
+                    return self._incomplete_result(pipeline_state, reasoning_trace, action, str(e))
             
             reasoning_trace.append(trace_step)
+
+            if action == 'generate_report' and trace_step['status'] == 'completed' and pipeline_state.get('analysis'):
+                # 综合正文已在服务中生成，报告完成后直接返回，避免主模型再次改写结论。
+                return self._completed_result(pipeline_state, reasoning_trace)
             
             # Step 6: 反馈给LLM
             messages.append({"role": "assistant", "content": llm_output})
@@ -229,11 +219,24 @@ class ReActController:
         error_msg = f"Task incomplete after {self.max_iterations} iterations"
         print(f"⚠️ {error_msg}")
         
-        return {
-            'final_answer': f"任务未完成：{error_msg}",
-            'reasoning_trace': reasoning_trace,
-            'result_data': last_result_data
-        }
+        return self._incomplete_result(pipeline_state, reasoning_trace, 'iteration_limit', error_msg)
+
+    @staticmethod
+    def _completed_result(state: Dict, trace: List) -> Dict:
+        """最终回答沿用已落入报告的正文，仅由代码补充实际文件路径。"""
+        report = state['report']
+        conclusion = state['analysis']['conclusion']
+        return {'status': 'completed', 'final_answer': conclusion + f"\n\n报告文件：{report['report_path']}",
+                'reasoning_trace': trace, 'result_data': report, 'analysis_result': state['analysis']}
+
+    @staticmethod
+    def _incomplete_result(state: Dict, trace: List, stage: str, error: str) -> Dict:
+        """保留真实结果供检查和重试，不把上游成功当成整个任务成功。"""
+        completed = [step['action'] for step in trace if step.get('status') == 'completed']
+        return {'status': 'failed', 'failure_stage': stage, 'error': error,
+                'final_answer': f"任务未完成，失败阶段：{stage}。{error}\n已完成步骤：{', '.join(completed) or '无'}。",
+                'reasoning_trace': trace, 'result_data': state.get('report'),
+                'analysis_result': state.get('analysis'), 'pipeline_state': state}
     
     def _build_system_prompt(self) -> str:
         """构造System Prompt"""
@@ -241,6 +244,10 @@ class ReActController:
             f"- **{tool.name}**: {tool.description}"
             for tool in self.tools.values()
         ])
+        stages = 'ensemble_segment、analyze_statistics、calculate_priority、'
+        if 'multimodal_analyze' in self.tools:
+            stages += 'multimodal_analyze、'
+        stages += 'generate_report'
         
         return f"""你是一个灾害应急响应专家助手。你有以下工具可用：
 
@@ -273,7 +280,8 @@ Final Answer: [你的最终回答，用自然语言总结分析结果和建议�
 - Action Input必须是有效的JSON格式
 - 当前任务只分析 Context 中 image_path 指定的单张图像，不得进行跨图汇总或图像间排名
 - 工具之间的数据由系统自动传递；不要复制 Observation 中的结构化结果
-- 必须依次完成 ensemble_segment、analyze_statistics、calculate_priority、generate_report 后才能输出 Final Answer
+- 必须依次完成 {stages} 后才能输出 Final Answer
+- multimodal_analyze 的 Action Input 使用 {{}}，三图、问题和真实工具结果均由系统注入；不得编造分析结果
 - Final Answer应该包含当前图像的具体数据、单图受灾等级和可执行的救援建议，该结论会写入当前图像报告
 - 如果某个工具失败，尝试其他方法或说明局限性
 """
@@ -356,6 +364,7 @@ Final Answer: [你的最终回答，用自然语言总结分析结果和建议�
             'segmentation_results': {},
             'statistics': None,
             'priority': None,
+            'analysis': None,
             'report': None,
         }
         context = context or {}
@@ -378,6 +387,15 @@ Final Answer: [你的最终回答，用自然语言总结分析结果和建议�
                 raise ValueError("缺少统计结果，请先调用 analyze_statistics")
             return {'stats_result': pipeline_state['statistics']}
 
+        if action == 'multimodal_analyze':
+            segmentation_results = pipeline_state['segmentation_results']
+            if not segmentation_results or pipeline_state['statistics'] is None or pipeline_state['priority'] is None:
+                raise ValueError('综合分析前必须完成分割、统计和优先级计算')
+            return {'user_query': context.get('user_query', ''),
+                    'segmentation_result': next(iter(segmentation_results.values())),
+                    'statistics_result': pipeline_state['statistics'],
+                    'priority_result': pipeline_state['priority']}
+
         if action == 'generate_report':
             if pipeline_state['priority'] is None:
                 raise ValueError("缺少优先级结果，请先调用 calculate_priority")
@@ -387,6 +405,11 @@ Final Answer: [你的最终回答，用自然语言总结分析结果和建议�
                 raise ValueError("缺少语义分割结果，请先调用 ensemble_segment")
             result['segmentation_result'] = next(iter(segmentation_results.values()))
             result['statistics_result'] = pipeline_state['statistics']
+            if 'multimodal_analyze' in self.tools:
+                analysis = pipeline_state.get('analysis')
+                if not analysis or analysis.get('status') != 'completed':
+                    raise ValueError('缺少完整多模态结论，请先调用 multimodal_analyze')
+                result['analysis_result'] = analysis
             output_filename = self._normalize_output_filename(context.get('output_filename'))
             if output_filename:
                 result['output_filename'] = output_filename
@@ -450,13 +473,24 @@ Final Answer: [你的最终回答，用自然语言总结分析结果和建议�
     ) -> None:
         """保存工具的真实返回值，供后续工具直接使用。"""
         if action == 'ensemble_segment':
-            pipeline_state['segmentation_results'][observation['image_path']] = observation
+            pipeline_state['segmentation_results'] = {observation['image_path']: observation}
+            pipeline_state['statistics'] = None
+            pipeline_state['priority'] = None
+            pipeline_state['analysis'] = None
+            pipeline_state['report'] = None
         elif action == 'analyze_statistics':
             pipeline_state['statistics'] = observation
             pipeline_state['priority'] = None
+            pipeline_state['analysis'] = None
             pipeline_state['report'] = None
         elif action == 'calculate_priority':
             pipeline_state['priority'] = observation
+            pipeline_state['analysis'] = None
+            pipeline_state['report'] = None
+        elif action == 'multimodal_analyze':
+            if observation.get('status') != 'completed' or not observation.get('conclusion'):
+                raise ValueError('多模态分析未完整完成')
+            pipeline_state['analysis'] = observation
             pipeline_state['report'] = None
         elif action == 'generate_report':
             pipeline_state['report'] = observation
@@ -471,6 +505,10 @@ Final Answer: [你的最终回答，用自然语言总结分析结果和建议�
                 'image_path': observation['image_path'],
                 'mask_shape': list(mask.shape),
             }
+        elif action == 'multimodal_analyze':
+            # 主调度只需知道分析完成；长正文和图片由状态保管，不截断后回传模型。
+            summary = {key: observation[key] for key in ('status', 'image_path', 'input_images', 'elapsed_seconds')}
+            summary['summary'] = observation['analysis']['summary']
         else:
             summary = observation
 
@@ -493,8 +531,7 @@ Final Answer: [你的最终回答，用自然语言总结分析结果和建议�
             return stem
         return filename
 
-    @staticmethod
-    def _missing_pipeline_stages(pipeline_state: Dict[str, Any]) -> List[str]:
+    def _missing_pipeline_stages(self, pipeline_state: Dict[str, Any]) -> List[str]:
         stages = []
         if not pipeline_state['segmentation_results']:
             stages.append('ensemble_segment')
@@ -502,6 +539,8 @@ Final Answer: [你的最终回答，用自然语言总结分析结果和建议�
             stages.append('analyze_statistics')
         if pipeline_state['priority'] is None:
             stages.append('calculate_priority')
+        if 'multimodal_analyze' in self.tools and not pipeline_state.get('analysis'):
+            stages.append('multimodal_analyze')
         if pipeline_state['report'] is None:
             stages.append('generate_report')
         return stages
@@ -511,30 +550,3 @@ Final Answer: [你的最终回答，用自然语言总结分析结果和建议�
         过滤掉工具不支持的参数，避免 execute() 收到 unexpected keyword argument。
         """
         return {k: v for k, v in action_input_dict.items() if k in params}
-
-    def _fallback_response(self, context: Dict, result_data: Dict) -> Dict[str, Any]:
-        """
-        LLM失败时的降级响应（规则引擎）
-        
-        Args:
-            context: 上下文信息
-            result_data: 已有的结果数据
-        
-        Returns:
-            降级响应
-        """
-        fallback_answer = """
-⚠️ **注意**: AI助手暂时不可用，以下是基于规则的基础分析：
-
-根据系统自动分析：
-- 已完成图像分割和统计
-- 建议查看生成的报告文件获取详细信息
-
-请稍后重试或联系技术支持。
-"""
-        
-        return {
-            'final_answer': fallback_answer,
-            'reasoning_trace': [],
-            'result_data': result_data
-        }
