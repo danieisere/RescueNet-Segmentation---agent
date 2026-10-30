@@ -5,7 +5,7 @@ import io
 import json
 import os
 from time import perf_counter
-from typing import Any, Dict
+from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 from PIL import Image
@@ -55,15 +55,15 @@ class MultimodalAnalysisService:
         if config:
             self.config.update(config)
 
-    def _prepare_evidence(self, segmentation: Dict, statistics: Dict, priority: Dict):
+    def _prepare_evidence(self, segmentation: Dict, statistics: Dict, priority: Dict = None, mode: str = "rescue"):
         """校验单图来源、原始掩膜统计以及三图尺寸，阻止错误证据进入模型。"""
         path = segmentation['image_path']
         rows = statistics.get('per_image_stats', [])
-        zones = priority.get('priority_zones', [])
-        if len(rows) != 1 or len(zones) != 1:
+        zones = priority.get('priority_zones', []) if priority is not None else []
+        if len(rows) != 1 or (mode == 'rescue' and len(zones) != 1) or (priority is not None and len(zones) != 1):
             raise ValueError('多模态综合分析要求同一张图像的统计和优先级结果')
-        row, zone = rows[0], zones[0]
-        if not _same_image(path, row.get('image_path')) or not _same_image(path, zone.get('image_path')):
+        row, zone = rows[0], zones[0] if zones else None
+        if not _same_image(path, row.get('image_path')) or (zone is not None and not _same_image(path, zone.get('image_path'))):
             raise ValueError('分割、统计与优先级结果的图像来源不一致')
         mask = segmentation['best_mask']
         classes, counts = np.unique(mask, return_counts=True)
@@ -124,15 +124,18 @@ class MultimodalAnalysisService:
                              'resize': resize_method,
                              'source_to_input_scale': [size[0] / source_size[0], size[1] / source_size[1]]})
         # 只复制业务数据，原始张量和图片内容不会进入持久化分析结果。
-        source = json.loads(json.dumps({'statistics': row, 'priority': zone}, default=_json_scalar, allow_nan=False))
-        evidence = {'source_data': source, 'legend': visualizations['legend'], 'alignment': alignment,
+        source_data = {'statistics': row}
+        if zone is not None:
+            source_data['priority'] = zone
+        source = json.loads(json.dumps(source_data, default=_json_scalar, allow_nan=False))
+        evidence = {'mode': mode, 'source_data': source, 'legend': visualizations['legend'], 'alignment': alignment,
                     'overlay_alpha': visualizations['overlay_alpha'],
                     'best_model': segmentation['best_model'], 'model_scores': segmentation['scores'],
                     'input_images': metadata}
         return evidence, images, metadata
 
     @staticmethod
-    def _parse_analysis(text: str) -> Dict:
+    def _parse_analysis(text: str, mode: str = "rescue") -> Dict:
         """解析并验证完整结构，禁止将空 JSON 或半份结论当作成功。"""
         text = text.strip()
         try:
@@ -148,25 +151,30 @@ class MultimodalAnalysisService:
             if (not isinstance(items, list) or (key != 'consistency_issues' and not items)
                     or any(not isinstance(item, str) or not item.strip() for item in items)):
                 raise ValueError(f'综合分析字段不完整：{key}')
-        recommendations = result.get('rescue_recommendations')
-        if not isinstance(recommendations, list) or not recommendations:
-            raise ValueError('综合分析缺少救援建议')
-        for item in recommendations:
-            if not isinstance(item, dict) or any(
-                not isinstance(item.get(key), str) or not item[key].strip() for key in ('action', 'basis')
-            ):
-                raise ValueError('救援建议缺少行动或依据')
+        if mode == 'rescue':
+            recommendations = result.get('rescue_recommendations')
+            if not isinstance(recommendations, list) or not recommendations:
+                raise ValueError('综合分析缺少救援建议')
+            for item in recommendations:
+                if not isinstance(item, dict) or any(
+                    not isinstance(item.get(key), str) or not item[key].strip() for key in ('action', 'basis')
+                ):
+                    raise ValueError('救援建议缺少行动或依据')
         # 丢弃模型擅自添加的统计字段；正式数字只能来自 source_data。
-        return {key: result[key] for key in ('summary', 'visual_observations', 'statistics_interpretation',
-                                             'consistency_issues', 'rescue_recommendations', 'limitations')}
+        keys = ['summary', 'visual_observations', 'statistics_interpretation', 'consistency_issues', 'limitations']
+        # 解释用途主动丢弃模型额外给出的建议，避免越过用户目标。
+        if mode == 'rescue':
+            keys.append('rescue_recommendations')
+        return {key: result[key] for key in keys}
 
     @staticmethod
-    def _render_conclusion(analysis: Dict, source: Dict) -> str:
+    def _render_conclusion(analysis: Dict, source: Dict, mode: str = "rescue") -> str:
         """以程序提供统计表，以模型提供解释，最终回答与报告复用同一正文。"""
-        stats, priority = source['statistics'], source['priority']
-        lines = ['## 灾情概述', analysis['summary'], '## 程序统计与优先级',
-                 f"原始掩膜像素总数：{stats['total_pixels']}；规则优先级：{priority['level']}；评分：{priority['priority_score']}。",
-                 ]
+        stats, priority = source['statistics'], source.get('priority')
+        lines = ['## 灾情概述', analysis['summary'], '## 程序统计',
+                 f"原始掩膜像素总数：{stats['total_pixels']}。"]
+        if priority is not None:
+            lines += ['## 规则优先级', f"规则优先级：{priority['level']}；评分：{priority['priority_score']}。"]
         table = ['| 类别 | 像素数量 | 占整张图比例 |', '|---|---:|---:|']
         for class_id, count in stats['class_counts'].items():
             table.append(f'| {CLASS_NAMES[int(class_id)]} | {count} | {count / stats["total_pixels"]:.2%} |')
@@ -176,16 +184,24 @@ class MultimodalAnalysisService:
                            ('一致性与疑点', 'consistency_issues')):
             lines += ['## ' + title, '\n'.join('- ' + value for value in analysis[key])
                       or '未提出明确冲突，仍需现场核验。']
-        lines.append('## 救援建议及依据')
-        lines.append('\n'.join(f"- **{item['action']}** 依据：{item['basis']}" for item in analysis['rescue_recommendations']))
+        if mode == 'rescue':
+            lines.append('## 救援建议及依据')
+            lines.append('\n'.join(f"- **{item['action']}** 依据：{item['basis']}" for item in analysis['rescue_recommendations']))
         lines += ['## 局限与待核查事项', '\n'.join('- ' + value for value in analysis['limitations'])]
         return '\n\n'.join(lines)
 
-    def analyze(self, user_query: str, segmentation_result: Dict, statistics_result: Dict, priority_result: Dict) -> Dict:
+    def analyze(self, user_query: str, segmentation_result: Dict, statistics_result: Dict, priority_result: Dict = None, mode: str = "rescue",
+                on_retry: Optional[Callable[[Dict], None]] = None) -> Dict:
         """独立的一次综合分析；后续 LangGraph 节点可直接调用本接口。"""
+        if mode not in {'rescue', 'interpretation'}:
+            raise ValueError('不支持的多模态分析用途')
         started = perf_counter()
-        evidence, images, metadata = self._prepare_evidence(segmentation_result, statistics_result, priority_result)
-        messages = [{'role': 'system', 'content': SYSTEM_PROMPT}, {'role': 'user', 'content': [
+        evidence, images, metadata = self._prepare_evidence(segmentation_result, statistics_result, priority_result, mode)
+        # 解释模式不要求优先级或行动建议，仍保留三图与统计的完整校验。
+        prompt = SYSTEM_PROMPT
+        if mode == 'interpretation':
+            prompt = prompt.replace('rescue_recommendations: 非空对象列表，每项包含非空 action（行动建议）和 basis（证据与理由）；', '不要输出 rescue_recommendations 或行动建议；本次仅解释视觉现象与统计。')
+        messages = [{'role': 'system', 'content': prompt}, {'role': 'user', 'content': [
             {'type': 'text', 'text': json.dumps({'question': user_query, **evidence}, ensure_ascii=False,
                                                default=_json_scalar, allow_nan=False)}, *images,
         ]}]
@@ -197,17 +213,20 @@ class MultimodalAnalysisService:
             text = self.client.complete(messages, max_tokens=self.config['max_tokens'],
                                         temperature=self.config['temperature'], timeout=self.config['timeout'])
             try:
-                analysis = self._parse_analysis(text)
+                analysis = self._parse_analysis(text, mode)
                 break
             except ValueError:
                 if attempt + 1 == attempts:
                     raise
-                messages[0]['content'] = SYSTEM_PROMPT + '\n上次返回结构不完整，请严格遵守全部 JSON 字段要求。'
+                # 仅发送即将实际发生的重试，不向事件记录泄露模型原始回复。
+                if on_retry is not None:
+                    on_retry({'attempt': attempt + 2, 'reason': 'invalid_analysis_structure'})
+                messages[0]['content'] = prompt + '\n上次返回结构不完整，请严格遵守全部 JSON 字段要求。'
         elapsed = round(perf_counter() - started, 3)
-        result = {'status': 'completed', 'image_path': segmentation_result['image_path'], 'analysis': analysis,
+        result = {'mode': mode, 'status': 'completed', 'image_path': segmentation_result['image_path'], 'analysis': analysis,
                   'source_data': evidence['source_data'], 'input_images': metadata,
                   'alignment': evidence['alignment'], 'model': self.client.config['model'],
                   'elapsed_seconds': elapsed, 'attempts': attempt + 1,
-                  'conclusion': self._render_conclusion(analysis, evidence['source_data'])}
+                  'conclusion': self._render_conclusion(analysis, evidence['source_data'], mode)}
         print(f'[INFO] 多模态综合分析完成 | 图片: 3 | 耗时: {elapsed} 秒')
         return result

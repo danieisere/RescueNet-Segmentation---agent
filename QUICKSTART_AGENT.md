@@ -1,11 +1,31 @@
 # 🚀 RescueNet应急响应智能体 - 快速启动指南
 
+当前默认引擎为 **LangGraph**。完整执行图与限制见 [LANGGRAPH_ARCHITECTURE.md](LANGGRAPH_ARCHITECTURE.md)。默认问题生成救援建议和独立数据产物；需要报告时显式给出 `--output name.html` / `name.md` 或在问题中要求完整报告。
+
+```bash
+# 分割 / 统计 / 优先级 / 视觉解释按需执行
+python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10807.jpg --question "只要分割图和叠加图，不要报告"
+python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10794.jpg --question "只统计类别像素和占比，不要报告"
+python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10801.jpg --question "只计算救援优先级分数，不要建议和报告"
+python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10836.jpg --question "结合三图解释道路分布，不要优先级和救援建议，不要报告"
+
+# 完整报告 / 兼容引擎
+python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10808.jpg --output assessment.html
+python agent_cli.py --engine react --image-folder ./RescueNet/test/test-org-img/10838.jpg --output assessment.md
+```
+
+进度输出示例（节点名来自实际图）：`validate → classify → segmentation → save_artifacts → statistics → ... → finalize`。每个长耗时节点先输出 `node_start`，不要求逐 token 输出。失败走统一终态并保留上游；需要澄清时结束本轮，修改问题重新运行。
+
+新产物路径为 `output/artifacts/<run_id>/items/<item_id>/`：三图在 `images/`，真实掩膜和独立数据在 `data/`，按需报告在 `report/`。run/item 下的 `manifest.json`、`request.json`、`result.json`、`events.jsonl` 可供复核。旧 reports 已归档到 `output/artifacts/legacy_reports/`，下文旧 ReAct 日志只用于说明兼容引擎。
+
+Windows CLI 在未显式配置 `MKL_THREADING_LAYER` 时默认使用 `SEQUENTIAL`，避免本地 NumPy/MKL 与 PyTorch 携带的 Intel OpenMP 冲突。该设置只影响本次 CLI 进程的 MKL 线程层；不绕过 OpenMP 检查，也不改动 CUDA 设备选择。直接从其他 Python 入口调用服务时，调用方需在导入数值库前处理自己的运行环境。
+
 ## ⚡ 5分钟快速开始
 
 ### Step 1: 安装依赖（1分钟）
 
 ```bash
-pip install torch torchvision opencv-python albumentations matplotlib tqdm tabulate Pillow openai python-dotenv jinja2 weasyprint
+pip install -r requirements.txt
 ```
 
 或者使用requirements.txt：
@@ -76,10 +96,10 @@ python agent_cli.py --image-folder ./RescueNet/test/test-org-img
 ### 基本用法
 
 ```bash
-# 单图：生成一份对应该图像的独立报告
+# 单图：默认生成救援建议并保存独立产物
 python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10782.jpg
 
-# 批量：对目录内每张图分别执行单图流程并生成独立报告
+# 批量：对目录内每张图分别执行独立单图流程
 python agent_cli.py --image-folder ./RescueNet/test/test-org-img
 
 # 自定义问题
@@ -142,15 +162,15 @@ python agent_cli.py \
 [Step 4/10]
 💭 Thought: 最后生成应急救援报告
 🔧 Action: generate_report
-📊 Observation: {"report_path": "./output/reports/emergency_report_...", ...}...
+📊 Observation: {"report_path": "./output/artifacts/<run_id>/items/<item_id>/report/emergency_report_...", ...}...
 
 [Step 5/10]
 💭 Thought: 任务已完成，可以给出最终回答
 ✅ Final Answer received
 
 根据分析，发现以下紧急情况：
-- 检测到X栋完全毁坏建筑
-- Y栋严重损坏建筑
+- 预测为完全毁坏建筑的像素占比为 X%
+- 预测为严重损坏建筑的像素占比为 Y%
 - 道路阻塞率Z%
 
 建议优先派遣救援队到...
@@ -160,7 +180,7 @@ python agent_cli.py \
 ============================================================
 [LLM生成的完整回答]
 
-✅ 报告已保存到: ./output/reports/emergency_report_20260619_234516.html
+✅ 报告已保存到: ./output/artifacts/<run_id>/items/<item_id>/report/emergency_report_20260619_234516.html
 💡 提示: 在浏览器中打开查看完整报告
 
 ============================================================
@@ -194,7 +214,7 @@ python train.py
 
 ### Q3: 如何查看生成的报告？
 
-**A**: 报告保存在 `./output/reports/` 目录下，直接用浏览器打开HTML文件即可。
+**A**: 报告仅在请求时生成，保存在 `./output/artifacts/<run_id>/items/<item_id>/report/`，直接打开 HTML 文件即可。独立分析 JSON 在同一 item 的 `data/analysis.json`，不依赖是否生成报告。
 
 ---
 

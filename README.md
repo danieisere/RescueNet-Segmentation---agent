@@ -1,4 +1,29 @@
-# RescueNet应急响应智能体 (RERA) - 设计文档
+# RescueNet 应急响应智能体 (RERA)
+
+默认使用 **LangGraph**：LLM 识别本轮单图目标，程序根据真实状态及依赖控制分割、统计、优先级、三图综合分析和可选报告。`--engine react` 保留原 ReAct 完整处理流程。根目录 [LANGGRAPH_ARCHITECTURE.md](LANGGRAPH_ARCHITECTURE.md) 保存架构图、状态及验收约定。
+
+```bash
+# 默认：给出救援建议，保存独立产物，不自动生成报告
+python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10801.jpg
+
+# 仅统计：不会调用优先级、综合分析或报告节点
+python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10794.jpg --question "只统计各类别像素和占比，不要报告"
+
+# 三图解释：不强制计算优先级
+python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10836.jpg --question "结合三图解释道路损坏分布，不要救援建议，不要报告"
+
+# 显式生成报告；也支持 --output assessment.md
+python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10808.jpg --output assessment.html
+
+# 保留的 ReAct 引擎
+python agent_cli.py --engine react --image-folder ./RescueNet/test/test-org-img/10838.jpg --output assessment.html
+```
+
+安装使用 `pip install -r requirements.txt`；需要支持图片输入的 OpenAI 兼容模型服务及本地三个分割权重。CLI 通过 LangGraph 原生 custom/updates 流显示节点开始、结束、重试、归档及安全状态摘要。公开的目标判断说明不是模型内部完整思维链。
+
+默认产物位于 `output/artifacts/<run_id>/items/<item_id>/`：`images/` 包含三图，`data/` 包含原始 `mask.npy`、图例/映射及实际完成阶段的 JSON，`report/` 只在需要时创建。run/item 均有请求、结果、manifest 和事件记录；掩膜统计与图像展示独立。`artifacts.output_dir` 可修改根目录；旧自定义 `report.output_dir` 在没有新配置时仍生效。旧 `output/reports/` 已按哈希校验迁入 `output/artifacts/legacy_reports/`。
+
+输入目录按图片分别执行并复用分割模型，各图状态独立；本阶段没有跨图排名、多轮记忆、自动恢复或 Checkpointer。退出码：全部完成 0，有执行失败 1，仅含澄清/不支持而无失败 2。失败保留已完成的阶段产物，不将 END 或部分产物当作整体成功。
 
 ## 1. 项目概述
 
@@ -6,18 +31,20 @@
 **RescueNet Emergency Response Agent (RERA)**
 
 ### 1.2 项目定位
-基于ReAct范式的多模态灾害应急响应智能体，融合深度学习分割模型与大语言模型（DeepSeek），实现从"图像感知"到"决策建议"的完整闭环。
+基于 LangGraph 默认调度与兼容 ReAct 调度的多模态灾害应急响应智能体，复用分割模型、规则计算与可配置大语言模型，实现从图像感知到证据解释和救援建议的处理流程。
 
 ### 1.3 核心价值
 - **解决痛点**: 灾后人工评估效率低，黄金救援时间宝贵
 - **技术创新**: LLM控制器 + Ensemble视觉感知 + 规则引擎决策
-- **实用价值**: 自动生成结构化救援报告，提升灾情评估效率80%+
+- **实用价值**: 按需生成结构化救援报告和独立档案；尚无可复现基准支持具体效率提升百分比。
 
 ---
 
 ## 2. 系统架构
 
 ### 2.1 整体架构
+
+当前默认图以 [最终架构图](LANGGRAPH_ARCHITECTURE.md#3-核心架构图) 为准。下面保留的 ReAct 控制器示意用于解释兼容引擎。
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -54,12 +81,12 @@
 
 | 组件 | 职责 | 技术实现 |
 |------|------|---------|
-| **LLM控制器** | 意图理解、任务规划、报告生成 | DeepSeek API (deepseek-chat) |
+| **LLM 目标识别 / LangGraph** | 校验目标、计算依赖、根据真实状态流式执行 | 公共 LLMClient + StateGraph |
 | **Ensemble Segment Tool** | 多模型融合分割，选择最优结果 | PyTorch + 置信度评分 |
 | **Statistics Analyzer** | 统计各类别数量、面积占比 | NumPy/Pandas |
 | **Priority Calculator** | 计算救援优先级评分 | 加权算法 |
 | **Multimodal Analysis** | 结合原图、分割图、叠加图和工具数据生成综合结论 | 独立分析服务 + OpenAI 兼容多模态接口 |
-| **Report Generator** | 生成HTML/PDF报告 | Jinja2模板引擎 |
+| **Report Generator** | 在本次 item 中生成 HTML/Markdown 报告 | 复用统一综合结论与共享三图 |
 
 ---
 
@@ -123,7 +150,7 @@ Score = mean(max_prob) - λ × normalized_entropy
 
 **优先级公式**:
 ```
-Priority_Score = w1 × N_destroyed + w2 × N_major + w3 × N_minor + w4 × Road_Blocked_Ratio
+Priority_Score = w1 × N_destroyed_pixels + w2 × N_major_pixels + w3 × N_minor_pixels + w4 × N_road_blocked_pixels
 
 权重配置:
 - w1 (完全毁坏): 0.6
@@ -164,7 +191,7 @@ Action Input: {"seg_results": [...]}
 ...
 
 Final Answer: 根据分析，发现以下紧急情况：
-1. A区域有15栋完全毁坏建筑...
+1. 当前影像中预测为完全毁坏建筑的像素占比为...
 2. 建议优先派遣救援队到...
 ```
 
@@ -173,11 +200,11 @@ Final Answer: 根据分析，发现以下紧急情况：
 
 ### 4.4 当前多模态综合分析流程
 
-当前 CLI 对每张图片依次执行：分割 → 统计 → 优先级 → 多模态综合分析 → 报告。综合分析完成后，报告与最终回答复用同一份结论。
+当前 LangGraph CLI 按目标选择阶段；完整报告和兼容 ReAct 依次执行：分割 → 统计 → 优先级 → 多模态综合分析 → 报告。仅请求救援建议则到综合分析为止。综合分析完成后，可选报告与最终回答复用同一份结论。
 
 - 分割结果中的 `visualizations` 提供原图、彩色分割图、半透明叠加图、完整类别图例和尺寸映射。三图映射到原图尺寸；统计仍读取原始类别掩膜。
 - `modules/agent/llm_client.py` 统一处理 Responses 和 Chat Completions 的文字/图片消息。调度只读文字，综合分析通过独立上下文接收真实的三个图片内容块。
-- `MultimodalAnalysisService.analyze()` 接收用户问题、真实分割、统计和优先级结果，可供后续 LangGraph 节点直接调用。当前 `multimodal_analyze` 工具只提供 ReAct 接口适配。
+- `MultimodalAnalysisService.analyze()` 已被 LangGraph 节点和 ReAct 共同复用；`interpretation` 使用三图与统计，`rescue` 额外要求真实优先级及有依据的救援建议。
 - 分析输出区分视觉观察、统计解释、疑点、行动建议及依据和局限；定量统计表由程序根据工具结果生成。视觉观察不等于现场确认，分割像素不等于建筑栋数。
 - 报告目录会同时保存 HTML/Markdown 报告和同名 `.analysis.json`。JSON 保存结构化结论、真实数据来源、图片尺寸/字节数/摘要哈希和调用耗时，不保存 Base64 图片正文或凭据。
 - 上游重新计算会使下游分析失效；同一上游状态重复调用分析会复用已有结果。图片、分析接口或结构化输出失败会保留已完成状态并明确报错，CLI 以非零退出码结束失败任务。

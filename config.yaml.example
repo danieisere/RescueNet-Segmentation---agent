@@ -49,9 +49,21 @@ report:
   format: html             # html | markdown
   include_visualization: true
   top_k_priority_zones: 5
-  output_dir: ./output/reports
+  output_dir: ./output/artifacts  # 兼容旧 API；CLI 优先使用 artifacts.output_dir
+
+# 每次调用一个 run 文件夹，每张图一个 item，数据产物与报告独立。
+artifacts:
+  output_dir: ./output/artifacts
+
+# 目标识别仅决定目的，实际阶段由图的真实状态和依赖决定。
+graph:
+  max_steps: 50
+  intent_max_tokens: 1800
+  intent_max_attempts: 2
+  intent_timeout: 90
 
 # ── Agent Runtime ───────────────────────────────────
 agent:
+  engine: langgraph        # langgraph | react；ReAct 保留原完整流程
   device: auto             # auto | cuda | cpu
   batch_size: 1

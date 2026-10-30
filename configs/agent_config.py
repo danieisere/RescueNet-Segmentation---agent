@@ -14,5 +14,7 @@ from configs.config_loader import (
     REPORT_CONFIG,
     AGENT_CONFIG,
     MULTIMODAL_CONFIG,
+    ARTIFACTS_CONFIG,
+    GRAPH_CONFIG,
     get_llm_api_key,
 )

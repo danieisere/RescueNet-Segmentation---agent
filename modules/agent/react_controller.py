@@ -55,7 +55,7 @@ class ReActController:
         """调度请求复用公共客户端，保持旧配置的温度与输出预算。"""
         return self.llm_client.complete(messages, max_tokens=self.max_tokens, temperature=self.temperature)
     
-    def run(self, user_query: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    def run(self, user_query: str, context: Dict[str, Any], artifact_item=None, on_event=None) -> Dict[str, Any]:
         """
         执行ReAct循环
         
@@ -163,6 +163,9 @@ class ReActController:
             try:
                 if action not in self.tools:
                     raise ValueError(f"Unknown tool: {action}")
+
+                if on_event:
+                    on_event(action, 'tool_start', 'running', '开始执行 ReAct 工具')
                 
                 # 解析Action Input并构建工具调用参数
                 action_input_dict = self._build_action_input_dict(
@@ -181,6 +184,17 @@ class ReActController:
                 else:
                     observation = self.tools[action].execute(**action_input_dict)
                 self._update_pipeline_state(action, observation, pipeline_state)
+                if artifact_item:
+                    # 保留原 ReAct 调度，每次真实工具成功后独立归档，失败也能保留上游。
+                    stage = {'ensemble_segment': 'segmentation', 'analyze_statistics': 'statistics',
+                             'calculate_priority': 'priority', 'multimodal_analyze': 'analysis',
+                             'generate_report': 'report'}[action]
+                    from .task_schema import STAGES
+                    # 内存中的失效规则必须同步到档案，不能让重算后的掩膜配上旧统计。
+                    artifact_item.invalidate(STAGES[STAGES.index(stage) + 1:])
+                    artifact_item.save_stage(stage, observation)
+                if on_event:
+                    on_event(action, 'tool_end', 'completed', '工具完成并归档')
                 observation_str = self._summarize_observation(action, observation)
                 
                 print(f"📊 Observation: {observation_str[:200]}...")
@@ -200,6 +214,12 @@ class ReActController:
                 trace_step['status'] = 'failed'
                 trace_step['error'] = str(e)
                 trace_step['elapsed_seconds'] = round(perf_counter() - started, 3)
+                if on_event:
+                    on_event(action, 'tool_error', 'failed', str(e))
+                if artifact_item:
+                    # 新归档入口不在文件保存失败后继续声称整轮成功。
+                    reasoning_trace.append(trace_step)
+                    return self._incomplete_result(pipeline_state, reasoning_trace, action, str(e))
                 if action == 'multimodal_analyze':
                     # 失败时保留完整已执行状态，不能回退成声称已完成的纯统计报告。
                     reasoning_trace.append(trace_step)
@@ -413,6 +433,10 @@ Final Answer: [你的最终回答，用自然语言总结分析结果和建议�
             output_filename = self._normalize_output_filename(context.get('output_filename'))
             if output_filename:
                 result['output_filename'] = output_filename
+            if context.get('report_output_dir'):
+                # 目录来自本次 item 上下文；不接受 LLM 提供的文件系统位置。
+                result.update(output_dir=context['report_output_dir'],
+                              report_format=context.get('report_format'), save_analysis=False)
             return result
 
         tool = self.tools[action]

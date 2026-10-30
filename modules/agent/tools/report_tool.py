@@ -6,6 +6,7 @@
 import os
 import json
 import re
+import uuid
 from datetime import datetime
 from typing import Dict, Any
 
@@ -39,8 +40,7 @@ class ReportGeneratorTool(BaseTool):
         self.config = config or REPORT_CONFIG
         self.output_dir = self.config['output_dir']
         
-        # 确保输出目录存在
-        os.makedirs(self.output_dir, exist_ok=True)
+        # 构造阶段不写磁盘，实际报告路径由每次调用决定。
     
     @property
     def name(self) -> str:
@@ -57,6 +57,9 @@ class ReportGeneratorTool(BaseTool):
         segmentation_result: Dict[str, Any] = None,
         statistics_result: Dict[str, Any] = None,
         analysis_result: Dict[str, Any] = None,
+        output_dir: str = None,
+        report_format: str = None,
+        save_analysis: bool = True,
     ) -> Dict[str, Any]:
         """
         生成应急救援报告
@@ -64,7 +67,10 @@ class ReportGeneratorTool(BaseTool):
         Args:
             priority_result: PriorityCalculatorTool的输出
             output_filename: 输出文件名（不含扩展名），默认自动生成
-            analysis_result: 已完成的多模态分析，正文直接复用并保存为独立 JSON
+            analysis_result: 已完成的多模态分析，正文直接复用
+            output_dir: 本次报告目录，不修改共享工具的默认目录
+            report_format: 本次报告格式，缺省沿用配置
+            save_analysis: 兼容旧调用保存旁路 JSON；统一产物层接管时设为 False
         
         Returns:
             {
@@ -91,9 +97,22 @@ class ReportGeneratorTool(BaseTool):
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_filename = f"emergency_report_{timestamp}"
         
-        # 根据配置选择格式
-        report_format = self.config['format']
-        
+        # 文件名只允许 basename，目录只能来自可信调用上下文。
+        if (not isinstance(output_filename, str) or not output_filename.strip()
+                or output_filename in {'.', '..'} or re.search(r'[\\/:*?"<>|\x00-\x1f]', output_filename)
+                or output_filename.endswith((' ', '.'))
+                or output_filename.split('.', 1)[0].upper() in {
+                    'CON', 'PRN', 'AUX', 'NUL',
+                    *('COM' + str(number) for number in range(1, 10)),
+                    *('LPT' + str(number) for number in range(1, 10)),
+                }):
+            raise ValueError('报告文件名必须是安全的 basename')
+        report_format = report_format or self.config['format']
+        if report_format not in {'html', 'markdown'}:
+            raise ValueError(f'Unsupported format: {report_format}')
+        target_dir = os.fspath(output_dir) if output_dir is not None else self.output_dir
+        os.makedirs(target_dir, exist_ok=True)
+
         # 优先复用分割工具生成的三图，保证报告与后续模型输入的颜色、位置完全一致。
         visualizations = self._build_visualizations(segmentation_result)
         original_image_data = visualizations.get('original', '')
@@ -101,39 +120,62 @@ class ReportGeneratorTool(BaseTool):
         overlay_data = visualizations.get('overlay', '')
         legend = visualizations.get('legend', segmentation_legend())
 
-        if report_format == 'html':
-            report_path = self._generate_html(
-                priority_result,
-                output_filename,
-                original_image_data,
-                visualization_data,
-                statistics_result,
-                overlay_data=overlay_data,
-                legend=legend,
-                has_multimodal_analysis=analysis_result is not None,
-            )
-        elif report_format == 'markdown':
-            report_path = self._generate_markdown(
-                priority_result, output_filename, visualization_data,
-                original_image_data=original_image_data, overlay_data=overlay_data, legend=legend,
-                has_multimodal_analysis=analysis_result is not None,
-            )
-        else:
-            raise ValueError(f"Unsupported format: {report_format}")
-        
-        analysis_path = None
-        if analysis_result is not None:
-            # 同一份正文写入报告与返回结果；结构化结果单独保存，方便复核和后续节点复用。
-            self.update_conclusion(report_path, analysis_result['conclusion'])
-            analysis_path = os.path.splitext(report_path)[0] + '.analysis.json'
-            with open(analysis_path, 'w', encoding='utf-8') as file:
-                json.dump(analysis_result, file, ensure_ascii=False, indent=2, allow_nan=False)
+        # 正式文件在完整渲染及结论写入成功后才提交，失败保留已有报告。
+        staging_dir = target_dir
+        final_filename = output_filename
+        output_filename = '.report-' + uuid.uuid4().hex
+        report_path = analysis_path = None
+        try:
+            if report_format == 'html':
+                report_path = self._generate_html(
+                    priority_result,
+                    output_filename,
+                    original_image_data,
+                    visualization_data,
+                    statistics_result,
+                    overlay_data=overlay_data,
+                    legend=legend,
+                    has_multimodal_analysis=analysis_result is not None,
+                    output_dir=staging_dir,
+                )
+            elif report_format == 'markdown':
+                report_path = self._generate_markdown(
+                    priority_result, output_filename, visualization_data,
+                    original_image_data=original_image_data, overlay_data=overlay_data, legend=legend,
+                    has_multimodal_analysis=analysis_result is not None,
+                    output_dir=staging_dir,
+                )
+            else:
+                raise ValueError(f"Unsupported format: {report_format}")
+
+            analysis_path = None
+            if analysis_result is not None:
+                # 同一份正文写入报告与返回结果；结构化结果单独保存，方便复核和后续节点复用。
+                self.update_conclusion(report_path, analysis_result['conclusion'])
+                if save_analysis:
+                    analysis_path = os.path.splitext(report_path)[0] + '.analysis.json'
+                    with open(analysis_path, 'w', encoding='utf-8') as file:
+                        json.dump(analysis_result, file, ensure_ascii=False, indent=2, allow_nan=False)
+
+            final_report = os.path.join(target_dir, final_filename + ('.html' if report_format == 'html' else '.md'))
+            if analysis_path is not None:
+                final_analysis = os.path.splitext(final_report)[0] + '.analysis.json'
+                os.replace(analysis_path, final_analysis)
+                analysis_path = final_analysis
+            os.replace(report_path, final_report)
+            report_path = final_report
+        finally:
+            # 仅清理本次临时文件，绝不删除先前成功提交的目标。
+            for extension in ('.html', '.md', '.analysis.json'):
+                temporary = os.path.join(target_dir, output_filename + extension)
+                if os.path.isfile(temporary):
+                    os.unlink(temporary)
 
         # 生成摘要
         summary = self._extract_summary(priority_result)
-        
+
         print(f"[INFO] 报告生成完成 | 格式: {report_format} | 路径: {report_path}")
-        
+
         return {
             'report_path': report_path,
             'format': report_format,
@@ -288,6 +330,7 @@ class ReportGeneratorTool(BaseTool):
         overlay_data: str = '',
         legend: list = None,
         has_multimodal_analysis: bool = False,
+        output_dir: str = None,
     ) -> str:
         """生成HTML格式报告"""
         from jinja2 import Template
@@ -315,7 +358,7 @@ class ReportGeneratorTool(BaseTool):
         )
         
         # 保存文件
-        report_path = os.path.join(self.output_dir, f"{filename}.html")
+        report_path = os.path.join(output_dir if output_dir is not None else self.output_dir, f"{filename}.html")
         with open(report_path, 'w', encoding='utf-8') as f:
             f.write(html_content)
         
@@ -325,6 +368,7 @@ class ReportGeneratorTool(BaseTool):
         self, priority_result: Dict, filename: str, visualization_data: str = '',
         original_image_data: str = '', overlay_data: str = '', legend: list = None,
         has_multimodal_analysis: bool = False,
+        output_dir: str = None,
     ) -> str:
         """生成Markdown格式报告"""
         md_content = self._build_markdown_content(priority_result, include_default_advice=not has_multimodal_analysis)
@@ -340,7 +384,7 @@ class ReportGeneratorTool(BaseTool):
             )
             md_content = '\n\n'.join(image_sections + ['\n'.join(legend_lines), md_content])
         
-        report_path = os.path.join(self.output_dir, f"{filename}.md")
+        report_path = os.path.join(output_dir if output_dir is not None else self.output_dir, f"{filename}.md")
         with open(report_path, 'w', encoding='utf-8') as f:
             f.write(md_content)
         
