@@ -16,5 +16,6 @@ from configs.config_loader import (
     MULTIMODAL_CONFIG,
     ARTIFACTS_CONFIG,
     GRAPH_CONFIG,
+    CONVERSATION_CONFIG,
     get_llm_api_key,
 )

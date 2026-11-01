@@ -1,4 +1,6 @@
 """跨图片复用的运行时服务；图状态不持有模型、设备或网络客户端。"""
+from pathlib import Path
+
 from .intent_router import IntentRouter
 
 
@@ -19,13 +21,15 @@ class RuntimeServices:
     def classify(self, question, explicit_output=None, on_retry=None):
         return IntentRouter(self.client).classify(question, explicit_output, on_retry)
 
-    def segment(self, image_path):
+    def segment(self, image_path, source_name=None):
         if self._segmenter is None:
             from .tools.ensemble_segment_tool import EnsembleSegmentationTool
             self._segmenter = EnsembleSegmentationTool()
         result = dict(self._segmenter.execute(image_path=image_path))
         # logits 仅供分割模型选择；不让其进入图状态、事件或持久化。
         result.pop('all_predictions', None)
+        # source_name 是用户可见的原始文件名；缺失时回退到当前输入路径文件名。
+        result['source_name'] = source_name or Path(image_path).name
         return result
 
     def statistics(self, segmentation):

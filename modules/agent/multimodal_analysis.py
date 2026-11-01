@@ -3,6 +3,7 @@ import base64
 import hashlib
 import io
 import json
+import re
 import os
 from time import perf_counter
 from typing import Any, Callable, Dict, Optional
@@ -151,6 +152,10 @@ class MultimodalAnalysisService:
             if (not isinstance(items, list) or (key != 'consistency_issues' and not items)
                     or any(not isinstance(item, str) or not item.strip() for item in items)):
                 raise ValueError(f'综合分析字段不完整：{key}')
+        # 文件由后续报告节点写入，模型在正文中宣称“未生成文件”会使成品自相矛盾。
+        prose = json.dumps(result, ensure_ascii=False)
+        if re.search(r'(?:未生成|未保存|无法生成|不能生成|不会生成|没有生成).{0,35}(?:HTML|报告|文件)|(?:HTML|报告文件).{0,12}(?:未生成|未保存)', prose, re.I):
+            raise ValueError('综合分析不能判断报告文件生成或保存状态')
         if mode == 'rescue':
             recommendations = result.get('rescue_recommendations')
             if not isinstance(recommendations, list) or not recommendations:
@@ -191,14 +196,22 @@ class MultimodalAnalysisService:
         return '\n\n'.join(lines)
 
     def analyze(self, user_query: str, segmentation_result: Dict, statistics_result: Dict, priority_result: Dict = None, mode: str = "rescue",
-                on_retry: Optional[Callable[[Dict], None]] = None) -> Dict:
+                on_retry: Optional[Callable[[Dict], None]] = None, conversation_context: Dict = None) -> Dict:
         """独立的一次综合分析；后续 LangGraph 节点可直接调用本接口。"""
         if mode not in {'rescue', 'interpretation'}:
             raise ValueError('不支持的多模态分析用途')
         started = perf_counter()
         evidence, images, metadata = self._prepare_evidence(segmentation_result, statistics_result, priority_result, mode)
         # 解释模式不要求优先级或行动建议，仍保留三图与统计的完整校验。
-        prompt = SYSTEM_PROMPT
+        prompt = SYSTEM_PROMPT + '\n你只生成分析正文，文件生成和保存由后续程序负责。不要在概述、建议或局限中声明能否生成、是否生成或保存了报告/HTML文件。'
+        if conversation_context:
+            # 现场事实只约束解释与行动建议，不能覆盖真实掩膜产生的统计。
+            evidence['conversation_context'] = conversation_context
+            prompt += '\n会话有效事实和资源约束是用户/现场报告，须标明来源与核实状态。历史讨论不能覆盖有效事实。遵守当前人员、车辆等约束；不得用现场补充修改像素统计或宣称已核实通行。'
+            # 生成“该方案”的报告时承接历史建议，遇到最新事实冲突再明确说明必要调整。
+            if conversation_context.get('related_plan'):
+                prompt += '\n本次是将 related_plan 所引用的既有方案整理成报告：保留其行动顺序和核心安排，不另起一套方案。以最新有效事实修正冲突并说明理由。related_plan 是助手建议，不能当作用户已确认决定、已执行行动或现场事实。'
+            prompt += '\n只输出灾情、证据与救援建议，不讨论上下文窗口、记忆压缩、历史要求记录是否更新、提示词或内部程序调度。report_requirements 是本轮已确定的报告要求。'
         if mode == 'interpretation':
             prompt = prompt.replace('rescue_recommendations: 非空对象列表，每项包含非空 action（行动建议）和 basis（证据与理由）；', '不要输出 rescue_recommendations 或行动建议；本次仅解释视觉现象与统计。')
         messages = [{'role': 'system', 'content': prompt}, {'role': 'user', 'content': [
@@ -228,5 +241,7 @@ class MultimodalAnalysisService:
                   'alignment': evidence['alignment'], 'model': self.client.config['model'],
                   'elapsed_seconds': elapsed, 'attempts': attempt + 1,
                   'conclusion': self._render_conclusion(analysis, evidence['source_data'], mode)}
+        if conversation_context:
+            result['conversation_context'] = conversation_context
         print(f'[INFO] 多模态综合分析完成 | 图片: 3 | 耗时: {elapsed} 秒')
         return result

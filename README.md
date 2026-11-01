@@ -1,29 +1,50 @@
 # RescueNet 应急响应智能体 (RERA)
 
+CLI 默认进入多轮对话，直接运行 `python agent_cli.py` 即可；带单张图片和 `--question` 时作为首轮输入，之后继续等待提问。`--chat` 是可省略的兼容参数。单轮或批量运行需显式添加 `--single-turn`，ReAct 示例为 `--single-turn --engine react`。
+
 默认使用 **LangGraph**：LLM 识别本轮单图目标，程序根据真实状态及依赖控制分割、统计、优先级、三图综合分析和可选报告。`--engine react` 保留原 ReAct 完整处理流程。根目录 [LANGGRAPH_ARCHITECTURE.md](LANGGRAPH_ARCHITECTURE.md) 保存架构图、状态及验收约定。
 
 ```bash
-# 默认：给出救援建议，保存独立产物，不自动生成报告
-python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10801.jpg
+# 单轮：给出救援建议，保存独立产物，不自动生成报告
+python agent_cli.py --single-turn --image-folder ./RescueNet/test/test-org-img/10801.jpg
 
 # 仅统计：不会调用优先级、综合分析或报告节点
-python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10794.jpg --question "只统计各类别像素和占比，不要报告"
+python agent_cli.py --single-turn --image-folder ./RescueNet/test/test-org-img/10794.jpg --question "只统计各类别像素和占比，不要报告"
 
 # 三图解释：不强制计算优先级
-python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10836.jpg --question "结合三图解释道路损坏分布，不要救援建议，不要报告"
+python agent_cli.py --single-turn --image-folder ./RescueNet/test/test-org-img/10836.jpg --question "结合三图解释道路损坏分布，不要救援建议，不要报告"
 
 # 显式生成报告；也支持 --output assessment.md
-python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10808.jpg --output assessment.html
+python agent_cli.py --single-turn --image-folder ./RescueNet/test/test-org-img/10808.jpg --output assessment.html
 
 # 保留的 ReAct 引擎
-python agent_cli.py --engine react --image-folder ./RescueNet/test/test-org-img/10838.jpg --output assessment.html
+python agent_cli.py --single-turn --engine react --image-folder ./RescueNet/test/test-org-img/10838.jpg --output assessment.html
 ```
 
 安装使用 `pip install -r requirements.txt`；需要支持图片输入的 OpenAI 兼容模型服务及本地三个分割权重。CLI 通过 LangGraph 原生 custom/updates 流显示节点开始、结束、重试、归档及安全状态摘要。公开的目标判断说明不是模型内部完整思维链。
 
 默认产物位于 `output/artifacts/<run_id>/items/<item_id>/`：`images/` 包含三图，`data/` 包含原始 `mask.npy`、图例/映射及实际完成阶段的 JSON，`report/` 只在需要时创建。run/item 均有请求、结果、manifest 和事件记录；掩膜统计与图像展示独立。`artifacts.output_dir` 可修改根目录；旧自定义 `report.output_dir` 在没有新配置时仍生效。旧 `output/reports/` 已按哈希校验迁入 `output/artifacts/legacy_reports/`。
 
-输入目录按图片分别执行并复用分割模型，各图状态独立；本阶段没有跨图排名、多轮记忆、自动恢复或 Checkpointer。退出码：全部完成 0，有执行失败 1，仅含澄清/不支持而无失败 2。失败保留已完成的阶段产物，不将 END 或部分产物当作整体成功。
+输入目录按图片分别执行并复用分割模型，各图状态独立，不支持跨图排名。单轮退出码：全部完成 0，有执行失败 1，仅含澄清/不支持而无失败 2。失败保留已完成的阶段产物，不将 END 或部分产物当作整体成功。
+
+多轮模式采用外层会话 LangGraph + 内层分析 LangGraph。根目录 [MULTITURN_ARCHITECTURE.md](MULTITURN_ARCHITECTURE.md) 保存会话架构图、状态、目录及恢复约定。
+
+```bash
+# 新建会话，可先提供图片和首轮问题；之后在终端连续提问
+python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10794.jpg --question "先统计各类别像素占比"
+
+# 恢复会话，继续原来的轮次编号；ID 替换为程序显示的真实值
+python agent_cli.py --session-id 20261031_153042
+
+# 列出已有会话；纯文本对话直接运行 python agent_cli.py
+python agent_cli.py --list-sessions
+```
+
+交互命令：`/exit` 或 `退出` 暂停并保留会话，`/new` 新建会话，`/image 图片路径` 切图，`/sessions` 列表，`/help` 帮助。每次普通输入是同一会话的一轮；关闭后可恢复。多轮默认目录为 `message/<YYYYMMDD_HHMMSS>/`（UTC+8 秒级 ID），同秒新建会等待下一秒避免重名。`--message-root` 可覆盖会话根目录。会话模式使用 LangGraph；原有单轮 ReAct 保留。
+
+每个会话的 `memory.sqlite` 保存原始消息、active/superseded 事实、摘要和产物索引；JSON/JSONL 为可重建的可读导出。`inputs/` 保存原图，`turns/<轮次>/artifacts/` 保存该轮真正生成的三图、真实掩膜、统计、分析和报告。历史轮次不改写；普通追问按需复用经过哈希及依赖签名验证的成果。现场补充改变建议，不修改像素统计。`output/` 继续保存独立单轮/批量及已有训练输出，不自动迁移历史成果。
+
+超过 8000 文本 token 后自动压缩，默认目标 6000；最近 4 轮是优先保留范围，必要时自动压缩较早的近期轮次，保留本轮请求、有效事实、方案内容及来源。原始消息不删除，终端显示压缩开始与完成事件，随后继续本轮任务。“把该方案生成报告”会携带相关方案及原消息引用，助手建议与现场事实分别保存。长消息分段压缩，失败不覆盖有效摘要。使用本地缓存可用的 tiktoken 编码，未知模型编码会明确采用假设或保守 UTF-8 估算；缺少缓存时不隐式下载阻塞终端。8000 是应用压缩阈值，实际模型窗口可通过 `conversation.model_context_window` 配置；图片预算单独控制。外层 SQLite Checkpointer 只保存会话状态；内层数组不进入检查点。恢复支持继续会话及验证复用已落盘成果，不承诺内层计算节点精确断点续跑。当前不包含网页或多人同时写同一会话。
 
 ## 1. 项目概述
 
@@ -335,13 +356,13 @@ python inference.py `
 
 ```bash
 # 单图：生成一份单图灾情报告
-python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10782.jpg
+python agent_cli.py --single-turn --image-folder ./RescueNet/test/test-org-img/10782.jpg
 
 # 批量：每张图分别生成一份独立报告
-python agent_cli.py --image-folder ./RescueNet/test/test-org-img
+python agent_cli.py --single-turn --image-folder ./RescueNet/test/test-org-img
 
 # 自定义问题
-python agent_cli.py \
+python agent_cli.py --single-turn \
     --image-folder ./RescueNet/test/test-org-img \
     --question "哪些区域的建筑物损坏最严重？应该优先派遣什么资源？" \
     --output critical_areas_report.html

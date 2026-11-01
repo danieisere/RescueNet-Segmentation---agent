@@ -79,6 +79,8 @@ class PriorityCalculatorTool(BaseTool):
             priority_zones.append({
                 'image_id': image_stat['image_id'],
                 'image_path': image_stat['image_path'],
+                # 优先级结果继续引用会话副本路径，并单独保留显示用源文件名。
+                'source_name': image_stat.get('source_name') or image_stat['image_id'],
                 'priority_score': round(score, 2),
                 'level': level,
                 'destroyed_count': int(destroyed_count),
@@ -155,6 +157,7 @@ class PriorityCalculatorTool(BaseTool):
             'top_3_critical': [
                 {
                     'image_id': z['image_id'],
+                    'source_name': z.get('source_name') or z['image_id'],
                     'score': z['priority_score'],
                     'destroyed': z['destroyed_count']
                 }

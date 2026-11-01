@@ -60,6 +60,7 @@ class ReportGeneratorTool(BaseTool):
         output_dir: str = None,
         report_format: str = None,
         save_analysis: bool = True,
+        conversation_context: Dict = None,
     ) -> Dict[str, Any]:
         """
         生成应急救援报告
@@ -142,6 +143,7 @@ class ReportGeneratorTool(BaseTool):
                 report_path = self._generate_markdown(
                     priority_result, output_filename, visualization_data,
                     original_image_data=original_image_data, overlay_data=overlay_data, legend=legend,
+                    source_name=(statistics_result or {}).get('per_image_stats', [{}])[0].get('source_name'),
                     has_multimodal_analysis=analysis_result is not None,
                     output_dir=staging_dir,
                 )
@@ -149,6 +151,19 @@ class ReportGeneratorTool(BaseTool):
                 raise ValueError(f"Unsupported format: {report_format}")
 
             analysis_path = None
+            if conversation_context:
+                # 将生成时的有效信息快照写进临时报告，之后更正不改写历史版本。
+                snapshot = json.dumps(conversation_context, ensure_ascii=False, indent=2, allow_nan=False)
+                with open(report_path, 'r', encoding='utf-8') as file:
+                    rendered = file.read()
+                if report_format == 'html':
+                    from html import escape
+                    section = '<section><h2>会话信息与来源快照</h2><pre>' + escape(snapshot) + '</pre></section>'
+                    rendered = rendered.replace('</body>', section + '</body>')
+                else:
+                    rendered += '\n\n## 会话信息与来源快照\n\n```json\n' + snapshot + '\n```\n'
+                with open(report_path, 'w', encoding='utf-8') as file:
+                    file.write(rendered)
             if analysis_result is not None:
                 # 同一份正文写入报告与返回结果；结构化结果单独保存，方便复核和后续节点复用。
                 self.update_conclusion(report_path, analysis_result['conclusion'])
@@ -339,9 +354,11 @@ class ReportGeneratorTool(BaseTool):
         template = Template(template_str)
         
         # 渲染模板
-        zone = priority_result['priority_zones'][0]
-        image_name = os.path.splitext(zone['image_id'])[0]
         image_stats = statistics_result['per_image_stats'][0] if statistics_result else {}
+        zone = priority_result['priority_zones'][0]
+        # 标题使用源文件名；内部 image_id/image_path 仍保留会话副本 original.jpg。
+        source_name = zone.get('source_name') or image_stats.get('source_name') or zone.get('image_id') or 'original.jpg'
+        image_name = os.path.splitext(os.path.basename(str(source_name)))[0]
         class_ratios = image_stats.get('class_ratios', {})
         html_content = template.render(
             title=f"{image_name} 灾害应急响应报告",
@@ -367,11 +384,13 @@ class ReportGeneratorTool(BaseTool):
     def _generate_markdown(
         self, priority_result: Dict, filename: str, visualization_data: str = '',
         original_image_data: str = '', overlay_data: str = '', legend: list = None,
+        source_name: str = None,
         has_multimodal_analysis: bool = False,
         output_dir: str = None,
     ) -> str:
         """生成Markdown格式报告"""
-        md_content = self._build_markdown_content(priority_result, include_default_advice=not has_multimodal_analysis)
+        md_content = self._build_markdown_content(priority_result, source_name=source_name,
+                                                  include_default_advice=not has_multimodal_analysis)
         # Markdown 与 HTML 展示相同的三图和全类别图例。
         images = [('原航拍图', original_image_data), ('语义分割图', visualization_data),
                   ('原图与分割结果叠加图', overlay_data)]
@@ -502,10 +521,13 @@ class ReportGeneratorTool(BaseTool):
 </html>
         """
     
-    def _build_markdown_content(self, priority_result: Dict, include_default_advice: bool = True) -> str:
+    def _build_markdown_content(self, priority_result: Dict, source_name: str = None,
+                                include_default_advice: bool = True) -> str:
         """构建Markdown内容"""
         zone = priority_result['priority_zones'][0]
-        image_name = os.path.splitext(zone['image_id'])[0]
+        # 旧优先级结果没有 source_name 时，回退到内部 image_id，兼容历史产物。
+        display_name = source_name or zone.get('source_name') or zone.get('image_id') or 'original.jpg'
+        image_name = os.path.splitext(os.path.basename(str(display_name)))[0]
         # 旧调用保留规则建议，多模态报告由正式综合结论提供建议，避免两套正文混杂。
         advice = """## 💡 救援建议
 

@@ -11,6 +11,10 @@ class LLMRequestError(RuntimeError):
     """请求失败或输出不完整；错误信息不携带请求图片和凭据。"""
 
 
+class LLMContextLengthError(LLMRequestError):
+    """接口明确拒绝过长输入；供会话层有限压缩重试，不能混同普通网络错误。"""
+
+
 class LLMClient:
     """使用统一消息格式；接口差异仅在发送前转换。"""
 
@@ -82,6 +86,14 @@ class LLMClient:
         except Exception as exc:
             # SDK 异常可能包含请求正文；只暴露类型和 HTTP 状态，不打印原始异常内容。
             status = getattr(exc, 'status_code', None)
+            body = getattr(exc, 'body', None)
+            code = getattr(exc, 'code', None)
+            if isinstance(body, dict):
+                error = body.get('error', body)
+                if isinstance(error, dict):
+                    code = error.get('code') or error.get('type') or code
+            if code in {'context_length_exceeded', 'context_window_exceeded', 'max_context_length_exceeded'}:
+                raise LLMContextLengthError('LLM 接口明确报告上下文长度超限') from None
             raise LLMRequestError(f'LLM 请求失败（{type(exc).__name__}，HTTP {status}）') from None
         if not isinstance(content, str) or not content.strip():
             raise LLMRequestError('LLM 返回空内容')

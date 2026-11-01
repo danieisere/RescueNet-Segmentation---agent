@@ -11,7 +11,18 @@ def dependencies(stage, state):
                'analysis': ['segmentation', 'statistics'], 'report': ['segmentation', 'statistics', 'priority', 'analysis']}[stage]
     if stage == 'analysis' and ('priority' in state.get('required_stages', [])):
         parents = parents + ['priority']
-    return {key: state.get('versions', {}).get(key, 0) for key in parents}
+    signature = {key: state.get('versions', {}).get(key, 0) for key in parents}
+    # 跨轮复用还必须匹配问题、事实和配置；单轮旧调用保持原有签名格式。
+    if stage in state.get('dependency_context', {}):
+        local = state['dependency_context'][stage]
+        if parents:
+            import hashlib
+            import json
+            # 不同运行的父版本都可能是 1；纳入完整父签名才能识别权重/配置变化。
+            identity = {'local': local, 'parents': {key: state.get('signatures', {}).get(key, {}) for key in parents}}
+            local = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        signature['_context'] = local
+    return signature
 
 
 def is_current(stage, state):
@@ -131,19 +142,25 @@ class GraphNodes:
         return {'status': 'running'}
 
     def classify(self, state):
-        task = self.services.classify(state['question'], state.get('explicit_output'),
-                                     lambda attempt: self.emit(state, 'classify', 'retry', 'running', '修正目标 JSON', attempt=attempt))
+        if state.get('task_override') is not None:
+            from .task_schema import TaskSpec
+            task = TaskSpec.model_validate(state['task_override'])
+        else:
+            task = self.services.classify(state['question'], state.get('explicit_output'),
+                                         lambda attempt: self.emit(state, 'classify', 'retry', 'running', '修正目标 JSON', attempt=attempt))
         return {'task': task.model_dump(), 'required_stages': required_stages(task), '_summary': task.decision_summary or task.status}
 
     def stage(self, name):
         def execute(state):
             signature = dependencies(name, state)
             for parent in signature:
+                if parent == '_context':
+                    continue
                 if not is_current(parent, state):
                     raise ValueError('缺少有效依赖：' + parent)
             started = perf_counter()
             if name == 'segmentation':
-                value = self.services.segment(state['image_path'])
+                value = self.services.segment(state['image_path'], state.get('source_name'))
             elif name == 'statistics':
                 value = self.services.statistics(state['segmentation'])
             elif name == 'priority':
@@ -152,13 +169,15 @@ class GraphNodes:
                 mode = 'rescue' if state['task']['needs_rescue_advice'] or state['task']['target'] == 'report' else 'interpretation'
                 value = self.services.analyze(user_query=state['question'], segmentation_result=state['segmentation'],
                                               statistics_result=state['statistics'], priority_result=state.get('priority'), mode=mode,
+                                              **({'conversation_context': state['conversation_context']} if state.get('conversation_context') else {}),
                                               on_retry=lambda info: self.emit(state, 'analysis', 'retry', 'running',
                                                                               '修正综合分析 JSON', attempt=info['attempt']))
             else:
                 value = self.services.report(priority_result=state['priority'], segmentation_result=state['segmentation'],
                                              statistics_result=state['statistics'], analysis_result=state['analysis'],
                                              output_filename=state.get('output_filename'), output_dir=str(self.item.item_dir / 'report'),
-                                             report_format=state['task']['report_format'], save_analysis=False)
+                                             report_format=state['task']['report_format'], save_analysis=False,
+                                             **({'conversation_context': state['conversation_context']} if state.get('conversation_context') else {}))
             validate_result(name, value, state)
             versions = dict(state.get('versions', {}))
             signatures = dict(state.get('signatures', {}))

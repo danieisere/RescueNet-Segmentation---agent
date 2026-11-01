@@ -30,13 +30,22 @@ class LangGraphController:
         for name in ('clarify', 'unsupported', 'failed'):
             builder.add_edge(name, END)
         builder.add_conditional_edges('finalize', lambda state: 'failed' if state.get('error') else END, ['failed', END])
-        self.graph = builder.compile()
+        # 嵌套在会话图中时也不继承外层检查点；真实数组只留在内层内存和产物文件。
+        self.graph = builder.compile(checkpointer=False)
 
     def stream(self, question, context):
         state = {'question': question, 'image_path': context['image_path'], 'run_id': self.item.store.run_id,
                  'item_id': self.item.item_id, 'explicit_output': context.get('explicit_output'),
                  'output_filename': context.get('output_filename'), 'pending': [], 'events': [],
                  'versions': {}, 'signatures': {}, 'stage_status': {}, 'status': 'running'}
+        # 只接受会话适配层恢复的业务字段，上一轮错误、最终状态不能污染新任务。
+        restored = context.get('restored_state', {})
+        for key in (*STAGES, 'versions', 'signatures', 'stage_status'):
+            if key in restored:
+                state[key] = restored[key]
+        for key in ('task_override', 'dependency_context', 'conversation_context'):
+            if key in context:
+                state[key] = context[key]
         shadow = dict(state)
         try:
             for mode, data in self.graph.stream(state, stream_mode=['custom', 'updates'],

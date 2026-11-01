@@ -2,8 +2,8 @@
 RescueNet应急响应智能体 - CLI入口脚本
 
 使用示例：
-    python agent_cli.py --image-folder ./RescueNet/test/test-org-img
-    python agent_cli.py --image-folder ./images --question "哪些区域最紧急？" --output my_report.html
+    python agent_cli.py
+    python agent_cli.py --single-turn --image-folder ./images --question "哪些区域最紧急？" --output my_report.html
 """
 import argparse
 import os
@@ -144,22 +144,22 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用示例:
-  # 基本用法
-  python agent_cli.py --image-folder ./RescueNet/test/test-org-img
+  # 默认进入多轮会话
+  python agent_cli.py
   
   # 自定义问题
-  python agent_cli.py --image-folder ./images --question "哪些区域建筑物损坏最严重？"
+  python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10794.jpg --question "先统计类别占比"
   
-  # 指定输出文件名
-  python agent_cli.py --image-folder ./images --output disaster_report.html
+  # 显式单轮/批量，并指定报告文件名
+  python agent_cli.py --single-turn --image-folder ./images --output disaster_report.html
   
         """
     )
     
-    parser.add_argument('--image-folder', type=str, required=True,
+    parser.add_argument('--image-folder', type=str, required=False,
                         help='灾区图像文件夹路径或单张图像路径')
     parser.add_argument('--question', type=str, 
-                        default='分析当前灾区图像的损坏情况并生成救援建议',
+                        default=None,
                         help='用户问题（默认：分析当前灾区图像并生成救援建议）')
     parser.add_argument('--output', type=str, default=None,
                         help='单图报告文件名；批量模式会自动追加图片名')
@@ -167,8 +167,29 @@ def main():
                         help='跳过前置条件检查（不推荐）')
     parser.add_argument('--engine', choices=['langgraph', 'react'], default=None,
                         help='执行引擎；默认使用配置中的 langgraph')
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('--chat', action='store_true', help='进入多轮会话（默认，可省略；保留兼容写法）')
+    modes.add_argument('--single-turn', action='store_true', help='显式执行一次单轮或批量任务，完成后退出')
+    parser.add_argument('--session-id', help='恢复已有秒级会话 ID 并进入交互')
+    parser.add_argument('--message-root', help='覆盖会话根目录；默认项目根目录 message')
+    parser.add_argument('--list-sessions', action='store_true', help='列出已有会话后退出')
     
     args = parser.parse_args()
+
+    if args.single_turn and (args.session_id or args.list_sessions):
+        parser.error('--single-turn 不能与 --session-id 或 --list-sessions 同时使用。')
+    # 默认进入会话；只有显式单轮参数才走原有流水线，避免带图片时误退出交互。
+    if not args.single_turn:
+        from modules.conversation.cli import run_chat
+        try:
+            return run_chat(args)
+        except (ValueError, OSError, RuntimeError) as exc:
+            from modules.agent.execution_events import safe_text
+            print('无法打开会话：' + safe_text(exc))
+            return 1
+    if not args.image_folder:
+        parser.error('--single-turn 需要 --image-folder；直接运行程序即可进入多轮会话。')
+    args.question = args.question or '分析当前灾区图像的损坏情况并生成救援建议'
     
     from configs.agent_config import AGENT_CONFIG, ARTIFACTS_CONFIG, LLM_CONFIG, REPORT_CONFIG
     engine = args.engine or AGENT_CONFIG.get('engine', 'langgraph')

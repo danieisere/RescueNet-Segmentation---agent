@@ -77,8 +77,8 @@ class ArtifactStore:
                                        status=item.manifest['status']) for item in self.items]
         atomic_json(self.run_dir / 'manifest.json', self.manifest)
 
-    def create_item(self, image_path, explicit_output=None):
-        item = ItemArtifacts(self, image_path, explicit_output)
+    def create_item(self, image_path, explicit_output=None, source_name=None):
+        item = ItemArtifacts(self, image_path, explicit_output, source_name)
         self.items.append(item)
         self._save_manifest()
         return item
@@ -110,7 +110,7 @@ class ArtifactStore:
 
 
 class ItemArtifacts:
-    def __init__(self, store, image_path, explicit_output):
+    def __init__(self, store, image_path, explicit_output, source_name=None):
         self.store = store
         self.item_id = unique_id('item_')
         self.item_dir = store.run_dir / 'items' / self.item_id
@@ -119,10 +119,13 @@ class ItemArtifacts:
         self.manifest = {'schema_version': 1, 'run_id': store.run_id, 'item_id': self.item_id,
                          'engine': store.engine, 'question': store.question, 'created_at': utc_now(),
                          'status': 'running', 'source': {'path': str(Path(image_path).resolve()),
-                         'sha256': sha256(image_path) if Path(image_path).is_file() else None},
+                         'sha256': sha256(image_path) if Path(image_path).is_file() else None,
+                         # 仅保存显示名，真实证据仍由 source.path 和 source.sha256 绑定。
+                         'source_name': source_name or Path(image_path).name},
                          'task': None, 'artifacts': []}
         atomic_json(self.item_dir / 'request.json', {'question': store.question, 'image_path': image_path,
-                                                   'explicit_output': explicit_output})
+                                                   'explicit_output': explicit_output,
+                                                   'source_name': source_name or Path(image_path).name})
         atomic_bytes(self.item_dir / 'events.jsonl', b'')
         self._save_manifest()
 

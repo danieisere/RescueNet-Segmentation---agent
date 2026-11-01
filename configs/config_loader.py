@@ -61,6 +61,18 @@ REPORT_CONFIG = {**REPORT_CONFIG, 'output_dir': ARTIFACTS_CONFIG['output_dir']}
 GRAPH_CONFIG = {'max_steps': 50, 'intent_max_tokens': 1800, 'intent_max_attempts': 2,
                 'intent_timeout': 90, **_config.get('graph', {})}
 
+# 会话默认目录锚定项目根目录，切换终端工作目录也不会把记忆写到别处。
+CONVERSATION_CONFIG = {'message_root': os.path.join(PROJECT_ROOT, 'message'),
+                       'compression_threshold': 8000, 'recent_turns': 4,
+                       'compression_target_tokens': 6000, 'compression_max_rounds': 4,
+                       'summary_input_tokens': 12000, 'summary_max_batches': 32,
+                       'model_context_window': 0,
+                       'summary_max_tokens': 1800, 'intent_max_tokens': 2200,
+                       'answer_max_tokens': 2400, **_config.get('conversation', {})}
+if not os.path.isabs(CONVERSATION_CONFIG['message_root']):
+    # 配置文件里的相对路径以项目为基准；CLI 的显式覆盖仍按用户当前目录解析。
+    CONVERSATION_CONFIG['message_root'] = os.path.normpath(os.path.join(PROJECT_ROOT, CONVERSATION_CONFIG['message_root']))
+
 # 综合分析使用独立输出预算；旧配置无需增加新节即可运行。
 MULTIMODAL_CONFIG = {
     'max_tokens': 4096, 'temperature': 0.3, 'timeout': 180,

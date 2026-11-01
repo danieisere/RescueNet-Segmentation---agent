@@ -55,6 +55,20 @@ report:
 artifacts:
   output_dir: ./output/artifacts
 
+# 多轮记忆与产物集中在每个会话文件夹；原有单轮 output 继续保留。
+conversation:
+  message_root: ./message
+  compression_threshold: 8000
+  recent_turns: 4                  # 优先保留；超预算时可压缩较早的近期轮次
+  compression_target_tokens: 6000 # 压缩后留出后续输入余量
+  compression_max_rounds: 4
+  summary_input_tokens: 12000     # 长历史分段整理，避免压缩请求自身超限
+  summary_max_batches: 32
+  model_context_window: 0         # 0 表示未配置；已知时填服务商实际窗口，含输出预留检查
+  summary_max_tokens: 1800
+  intent_max_tokens: 2200
+  answer_max_tokens: 2400
+
 # 目标识别仅决定目的，实际阶段由图的真实状态和依赖决定。
 graph:
   max_steps: 50

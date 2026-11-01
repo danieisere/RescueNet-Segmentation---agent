@@ -68,6 +68,8 @@ class StatisticsAnalyzerTool(BaseTool):
             image_stat = {
                 'image_path': image_path,
                 'image_id': self._extract_image_id(image_path),
+                # 统计保留内部 image_id，同时向报告传递用户原始文件名。
+                'source_name': result.get('source_name') or self._extract_image_id(image_path),
                 'total_pixels': total_pixels,
                 'class_counts': class_counts,
                 'class_ratios': class_ratios,

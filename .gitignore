@@ -43,6 +43,9 @@ ENV/
 *.log
 runs/
 output/
+# 多轮运行数据可能包含现场信息和图片，仅保留目录占位。
+/message/*
+!/message/.gitkeep
 
 # Interview Prep (personal)
 AI-Agent-Interview-Preparation.md
