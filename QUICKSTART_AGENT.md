@@ -1,265 +1,186 @@
-# 🚀 RescueNet应急响应智能体 - 快速启动指南
+# RERA 快速开始
 
-默认多轮对话：运行 `python agent_cli.py` 即可，`--chat` 可以省略。需要执行完一次任务就退出，或批量处理目录时，添加 `--single-turn`。
+当前默认模式是多轮 LangGraph 会话。直接执行 `python agent_cli.py` 会创建会话并等待输入；`--chat` 可以省略。需要运行一次后退出，或者处理图片目录时，显式添加 `--single-turn`。
 
-当前默认引擎为 **LangGraph**。完整执行图与限制见 [LANGGRAPH_ARCHITECTURE.md](LANGGRAPH_ARCHITECTURE.md)。默认问题生成救援建议和独立数据产物；需要报告时显式给出 `--output name.html` / `name.md` 或在问题中要求完整报告。
-
-```bash
-# 分割 / 统计 / 优先级 / 视觉解释按需执行
-python agent_cli.py --single-turn --image-folder ./RescueNet/test/test-org-img/10807.jpg --question "只要分割图和叠加图，不要报告"
-python agent_cli.py --single-turn --image-folder ./RescueNet/test/test-org-img/10794.jpg --question "只统计类别像素和占比，不要报告"
-python agent_cli.py --single-turn --image-folder ./RescueNet/test/test-org-img/10801.jpg --question "只计算救援优先级分数，不要建议和报告"
-python agent_cli.py --single-turn --image-folder ./RescueNet/test/test-org-img/10836.jpg --question "结合三图解释道路分布，不要优先级和救援建议，不要报告"
-
-# 完整报告 / 兼容引擎
-python agent_cli.py --single-turn --image-folder ./RescueNet/test/test-org-img/10808.jpg --output assessment.html
-python agent_cli.py --single-turn --engine react --image-folder ./RescueNet/test/test-org-img/10838.jpg --output assessment.md
-```
-
-进度输出示例（节点名来自实际图）：`validate → classify → segmentation → save_artifacts → statistics → ... → finalize`。每个长耗时节点先输出 `node_start`，不要求逐 token 输出。失败走统一终态并保留上游；需要澄清时结束本轮，修改问题重新运行。
-
-新产物路径为 `output/artifacts/<run_id>/items/<item_id>/`：三图在 `images/`，真实掩膜和独立数据在 `data/`，按需报告在 `report/`。run/item 下的 `manifest.json`、`request.json`、`result.json`、`events.jsonl` 可供复核。旧 reports 已归档到 `output/artifacts/legacy_reports/`，下文旧 ReAct 日志只用于说明兼容引擎。
-
-Windows CLI 在未显式配置 `MKL_THREADING_LAYER` 时默认使用 `SEQUENTIAL`，避免本地 NumPy/MKL 与 PyTorch 携带的 Intel OpenMP 冲突。该设置只影响本次 CLI 进程的 MKL 线程层；不绕过 OpenMP 检查，也不改动 CUDA 设备选择。直接从其他 Python 入口调用服务时，调用方需在导入数值库前处理自己的运行环境。
-
-## 多轮终端对话
-
-```bash
-# 新建会话并开始交流；不提供图片也可先进行文字讨论
-python agent_cli.py --image-folder ./RescueNet/test/test-org-img/10794.jpg --question "先统计类别占比"
-
-# 恢复时替换为实际显示的秒级 ID
-python agent_cli.py --session-id 20261031_153042
-python agent_cli.py --list-sessions
-```
-
-同一终端反复输入属于同一会话。`/exit` 或 `退出` 保存并暂停，`/new` 创建新会话，`/image 图片路径` 切换当前图片，`/help` 查看命令。会话目录为根目录 `message/<session_id>/`，其中 `turns/` 包含各轮记录和新分析成果；`memory.sqlite` 是记忆权威来源，JSON/JSONL 便于直接阅读。单轮输出继续使用原 `output/artifacts/`。可通过 `--message-root` 或 `conversation.message_root` 覆盖会话位置。
-
-支持事实补充、更正、关注重点和按需报告；“不是8人，是12人，再生成报告”先更新事实再生成。会话模式报告格式通过文字指定 HTML/Markdown，不使用单轮的 `--output`。详细架构、原始消息保留、压缩和恢复边界见 [MULTITURN_ARCHITECTURE.md](MULTITURN_ARCHITECTURE.md)。
-
-历史超过应用的 8000 文本 token 预算时自动压缩并继续当前请求，不需要手动整理或新建会话。终端显示 `compression_start` / `compression_end`；原始消息完整保留，相关方案及来源会传入报告。近期 4 轮是优先保留而非不可压缩；默认压缩目标为 6000。UTF-8 保守估算可能提前触发，不能据此认定服务商模型窗口已满。
-
-## ⚡ 5分钟快速开始
-
-### Step 1: 安装依赖（1分钟）
+## 1. 准备环境
 
 ```bash
 pip install -r requirements.txt
+copy config.yaml.example config.yaml
 ```
 
-或者使用requirements.txt：
+编辑 `config.yaml`，填写大模型服务地址、模型和凭据。服务必须支持图片输入。准备三个分割权重后，确认它们位于 `runs/` 或 `ensemble.weight_dir` 配置的目录。
+
+如果数据集尚未准备，先运行：
 
 ```bash
-pip install -r requirements.txt
-```
-
----
-
-### Step 2: 配置 LLM API Key（1分钟）
-
-1. 从 `config.yaml` 中配置的 LLM 服务商获取 API Key
-2. 确认 `llm.api_key_env` 是要使用的环境变量名
-3. 复制配置和环境变量模板：
-
-```bash
-cp config.yaml.example config.yaml
-cp .env.example .env
-```
-
-编辑 `.env`，填入与 `config.yaml` 中 `llm.api_key_env` 对应的 Key：
-
-```dotenv
-CODEXCN_API_KEY=your_codexcn_api_key_here
-```
-
-> ⚠️ `.env` 和 `config.yaml` 均已 gitignore，不会被提交到 GitHub。
-
----
-
-### Step 3: 准备并运行模型
-
-**Step 3.1: 下载数据集并训练模型（约2-3小时）**
-
-> ⚠️ RescueNet 数据集不包含在本仓库中，请先从 [BinaLab/RescueNet](https://github.com/BinaLab/RescueNet-A-High-Resolution-Post-Disaster-UAV-Dataset-for-Semantic-Segmentation) 下载，并按以下结构放置：
-> ```
-> RescueNet/
-> ├── train/train-org-img/   # 训练原始图像 (.jpg)
-> ├── train/train-label-img/ # 训练标签掩码 (_lab.png)
-> ├── test/test-org-img/     # 测试原始图像 (.jpg)
-> └── test/test-label-img/   # 测试标签掩码 (_lab.png)
-> ```
-
-```bash
-# 验证数据集结构
 python verify_dataset.py
-
-# 训练三个模型
 python train.py
 ```
 
-等待训练完成，确认以下文件存在：
+## 2. 默认多轮会话
+
+最简单的启动方式：
+
 ```bash
-ls runs/unet_final.pth runs/pspnet_final.pth runs/deeplabv3_final.pth
+python agent_cli.py
 ```
 
-**Step 3.2: 运行Agent**
+带图片进入第一轮：
 
 ```bash
-python agent_cli.py --single-turn --image-folder ./RescueNet/test/test-org-img
+python agent_cli.py \
+  --image-folder ./RescueNet/test/test-org-img/10794.jpg \
+  --question "先统计各类别像素占比，不生成报告"
 ```
 
----
+执行完首轮后，终端不会自动结束，会继续等待下一轮。比如可以继续输入：
 
-## 📋 完整命令参考
+```text
+补充现场有10名应急专家将进场
+请根据前面的结果给出应急救援方案
+好，把该方案生成为 HTML 报告
+```
 
-### 基本用法
+输入 `/exit` 或 `退出` 会保存并结束当前终端；之后使用显示的 ID 恢复：
 
 ```bash
-# 单图：默认生成救援建议并保存独立产物
-python agent_cli.py --single-turn --image-folder ./RescueNet/test/test-org-img/10782.jpg
+python agent_cli.py --session-id 20261031_165539
+```
 
-# 批量：对目录内每张图分别执行独立单图流程
-python agent_cli.py --single-turn --image-folder ./RescueNet/test/test-org-img
+会话命令：
 
-# 自定义问题
+```text
+/help                 查看帮助
+/image 图片路径        切换当前图片
+/sessions             列出历史会话
+/new                  新建会话并保留旧会话
+/exit                 保存并退出
+```
+
+会话目录默认是 `message/<YYYYMMDD_HHMMSS>/`。每个普通输入对应一轮，关闭终端不会删除消息、摘要、事实或历史产物。
+
+## 3. 单轮和批量执行
+
+只需要一次结果时：
+
+```bash
+# 默认给出救援建议，不生成报告
 python agent_cli.py --single-turn \
-    --image-folder ./images \
-    --question "哪些区域建筑物损坏最严重？"
+  --image-folder ./RescueNet/test/test-org-img/10801.jpg
 
-# 指定报告文件名；批量时会自动追加图片名避免覆盖
+# 只统计
 python agent_cli.py --single-turn \
-    --image-folder ./images \
-    --output my_disaster_report.html
+  --image-folder ./RescueNet/test/test-org-img/10794.jpg \
+  --question "只统计类别像素和占比，不要报告"
 
-# 跳过前置检查（不推荐）
+# 只做三图视觉解释
 python agent_cli.py --single-turn \
-    --image-folder ./images \
-    --skip-check
+  --image-folder ./RescueNet/test/test-org-img/10836.jpg \
+  --question "结合三图解释道路损坏分布，不要救援建议，不要报告"
+
+# 显式生成报告
+python agent_cli.py --single-turn \
+  --image-folder ./RescueNet/test/test-org-img/10808.jpg \
+  --output assessment.html
+
+# 处理整个目录，每张图片单独归档
+python agent_cli.py --single-turn \
+  --image-folder ./RescueNet/test/test-org-img
 ```
 
----
+单轮/批量默认使用 LangGraph。ReAct 作为兼容引擎保留：
 
-## 🎬 预期输出示例
-
-### 输出示例
-
-```
-🔍 检查Agent运行前置条件...
-============================================================
-✅ 模型权重文件齐全
-✅ DeepSeek API Key已配置
-============================================================
-✅ 所有前置条件满足，可以启动Agent！
-
-📁 找到 1 张图像
-
-🔧 初始化Agent工具...
-✅ 已加载 4 个工具
-
-============================================================
-📝 用户问题: 分析这批灾区的损坏情况并生成救援建议
-============================================================
-
-🤖 Agent开始执行ReAct循环...
-============================================================
-
-[Step 1/10]
-💭 Thought: 我需要先对图像进行分割处理
-🔧 Action: ensemble_segment
-📊 Observation: {"best_model": "deeplabv3", "scores": {...}}...
-
-[Step 2/10]
-💭 Thought: 现在需要统计各类别数量
-🔧 Action: analyze_statistics
-📊 Observation: {"per_image_stats": [...], "global_stats": {...}}...
-
-[Step 3/10]
-💭 Thought: 根据统计数据计算救援优先级
-🔧 Action: calculate_priority
-📊 Observation: {"priority_zones": [...], "statistics": {...}}...
-
-[Step 4/10]
-💭 Thought: 最后生成应急救援报告
-🔧 Action: generate_report
-📊 Observation: {"report_path": "./output/artifacts/<run_id>/items/<item_id>/report/emergency_report_...", ...}...
-
-[Step 5/10]
-💭 Thought: 任务已完成，可以给出最终回答
-✅ Final Answer received
-
-根据分析，发现以下紧急情况：
-- 预测为完全毁坏建筑的像素占比为 X%
-- 预测为严重损坏建筑的像素占比为 Y%
-- 道路阻塞率Z%
-
-建议优先派遣救援队到...
-
-============================================================
-📋 Final Answer:
-============================================================
-[LLM生成的完整回答]
-
-✅ 报告已保存到: ./output/artifacts/<run_id>/items/<item_id>/report/emergency_report_20260619_234516.html
-💡 提示: 在浏览器中打开查看完整报告
-
-============================================================
-🎉 Agent执行完成！
-============================================================
-```
-
----
-
-## ❓ 常见问题
-
-### Q1: 提示"缺少模型权重文件"？
-
-**A**: 运行训练脚本生成所需权重：
 ```bash
-python train.py
+python agent_cli.py --single-turn --engine react \
+  --image-folder ./RescueNet/test/test-org-img/10838.jpg \
+  --output assessment.html
 ```
 
-> 每份 HTML 报告只分析一张图像，右上角包含该图对应的语义分割图和关键类别图例。批量模式不会生成跨图汇总报告。
+`--output` 只能在单轮/批量模式使用。多轮会话中，应在自然语言消息中要求生成报告并指定 HTML 或 Markdown。
 
----
+## 4. LangGraph 会执行什么
 
-### Q2: DeepSeek API调用失败？
+LLM 先把请求转换成受校验的目标，图路由根据真实依赖决定阶段：
 
-**A**: 检查以下几点：
-1. API Key是否正确配置
-2. 网络连接是否正常
-3. API余额是否充足
+| 用户请求 | 阶段 |
+|---|---|
+| 生成分割图或叠加图 | 分割 → 保存产物 |
+| 统计类别像素和占比 | 分割 → 统计 → 保存产物 |
+| 计算救援优先级 | 分割 → 统计 → 优先级 → 保存产物 |
+| 结合三图解释 | 分割 → 统计 → 多模态解释 → 保存产物 |
+| 给出救援建议 | 分割 → 统计 → 优先级 → 多模态救援分析 → 保存产物 |
+| 生成完整报告 | 分割 → 统计 → 优先级 → 多模态救援分析 → 报告 → 保存产物 |
 
----
+节点完成后通过 LangGraph 流式事件输出开始、结束、重试、阶段复用、产物保存和终态。事件中的摘要是公开状态说明，不是模型完整内部思维链。
 
-### Q3: 如何查看生成的报告？
+## 5. 查看产物
 
-**A**: 报告仅在请求时生成，保存在 `./output/artifacts/<run_id>/items/<item_id>/report/`，直接打开 HTML 文件即可。独立分析 JSON 在同一 item 的 `data/analysis.json`，不依赖是否生成报告。
+单轮/批量产物位于：
 
----
-
-### Q4: 想调整优先级权重？
-
-**A**: 编辑 `config.yaml` 中的 `priority_weights` 配置：
-
-```yaml
-priority_weights:
-  destroyed: 0.6     # 调整这个值
-  major: 0.3
-  minor: 0.1
-  road_blocked: 0.2
+```text
+output/artifacts/<run_id>/items/<item_id>/
 ```
 
----
+其中：
 
-## 🎯 下一步
+- `images/`：原图、彩色分割图、半透明叠加图；
+- `data/mask.npy`：原始类别掩膜；
+- `data/visualization.json`：图例和尺寸映射；
+- `data/statistics.json`：统计结果；
+- `data/priority.json`：规则优先级；
+- `data/analysis.json`：结构化综合分析；
+- `report/`：用户明确要求时生成的 HTML/Markdown 报告；
+- `manifest.json`、`events.jsonl`、`result.json`：来源、哈希、事件和最终状态。
 
-1. **阅读设计文档**: 查看 `AGENT_DESIGN.md` 了解完整架构
-2. **自定义问题**: 尝试不同的用户查询，观察Agent的推理过程
-3. **扩展功能**: 添加新的Tool或调整现有算法
-4. **部署Web界面**: 实现Streamlit交互式界面（可选）
+多轮产物位于：
 
----
+```text
+message/<session_id>/turns/<turn_id>/artifacts/<run_id>/items/<item_id>/
+```
 
-**祝你使用愉快！** 🚀
+历史轮次不会被新报告覆盖。后续轮次可以验证并复用仍然有效的分割、统计和优先级结果。
 
-如有问题，请查看 `AGENT_DESIGN.md` 或提交Issue。
+## 6. 上下文压缩
+
+默认文本压缩阈值为 8000，目标长度为 6000。压缩时：
+
+- 原始消息继续完整保留；
+- 当前请求、有效事实和相关方案来源必须保留；
+- 较早对话按需压缩，长消息可以分段整理；
+- 压缩失败时保留旧摘要和原始消息；
+- 终端输出压缩开始、重试和完成事件。
+
+8000 是应用层预算，不等于服务商上下文窗口。模型窗口可以通过 `conversation.model_context_window` 配置；没有本地 tokenizer 缓存时，系统会明确使用保守估算，不会隐式联网下载。
+
+## 7. 退出码
+
+单轮/批量模式：
+
+- `0`：所有图片完成；
+- `1`：至少一张图片执行失败；
+- `2`：只有澄清或不支持请求，没有执行失败。
+
+多轮模式会持续交互；单轮结果中的 `status` 和归档路径以程序输出为准。
+
+## 8. 常见问题
+
+**为什么默认命令没有立刻结束？**
+
+因为默认模式是多轮会话。需要一次性运行时使用 `--single-turn`。
+
+**为什么只问统计却没有报告？**
+
+报告是独立目标。统计请求不会自动生成报告；请在同一会话中继续要求生成报告，或在单轮模式中使用 `--output`。
+
+**为什么报告里有三张图？**
+
+多模态分析同时读取原图、分割图和半透明叠加图。分割图和报告使用同一套图例，类别统计仍使用原始掩膜数组。
+
+**报告生成失败后数据会丢失吗？**
+
+不会。已经成功的阶段会保留在对应 item 中；失败轮次和失败原因也会归档，后续请求可以验证并复用有效阶段。
+
+**如何查看完整图？**
+
+查看根目录的 [LANGGRAPH_ARCHITECTURE.md](LANGGRAPH_ARCHITECTURE.md)、[LANGGRAPH_WORKFLOW.md](LANGGRAPH_WORKFLOW.md) 和 [MULTITURN_ARCHITECTURE.md](MULTITURN_ARCHITECTURE.md)。
