@@ -81,6 +81,14 @@ class ConversationController:
 
     def _evidence(self):
         meta = self.store.meta()
+        if len(meta['active_image_ids']) > 1:
+            values = []
+            for image_id in meta['active_image_ids']:
+                evidence = self.bridge.latest_evidence(self.store, image_id)
+                if evidence and evidence.get('conversation_fingerprint') != self._fact_fingerprint(self._snapshot(image_id)):
+                    evidence = {key: value for key, value in evidence.items() if key != 'analysis'}
+                values.append({'image_id': image_id, 'evidence': evidence})
+            return {'per_image': values}
         evidence = self.bridge.latest_evidence(self.store, meta['current_image_id'])
         if evidence and 'analysis' in evidence:
             # 旧建议不能成为新事实；现场状态变化后只保留不受影响的统计证据。
@@ -95,10 +103,18 @@ class ConversationController:
         # 执行状态版本可能因澄清更新而变化；证据是否过期只比较分析相关内容。
         return fingerprint({key: snapshot.get(key) for key in ('image_id', 'focus', 'active_facts', 'decisions')})
 
-    def _snapshot(self):
+    def _snapshot(self, image_id=None):
         meta = self.store.meta()
-        facts = self.store.facts(image_id=meta['current_image_id'])
-        return {'session_id': self.store.session_id, 'image_id': meta['current_image_id'],
+        active = [image_id] if image_id else meta['active_image_ids']
+        facts = [fact for fact in self.store.facts() if fact['scope'] == 'session' or fact.get('image_id') in active]
+        attachment_data = (self.turn or {}).get('input_metadata', {}).get('attachment_metadata', {})
+        sources = attachment_data.get('sources', []) if isinstance(attachment_data, dict) else []
+        all_ids = (self.turn or {}).get('input_metadata', {}).get('image_ids', [])
+        names = {image_id: source['source_name'] for image_id, source in zip(all_ids, sources)}
+        return {'session_id': self.store.session_id, 'image_id': active[0] if len(active) == 1 else None,
+                'image_ids': active,
+                'source_names': names, 'source_name': names.get(active[0]) if len(active) == 1 else None,
+                'web_request': bool((self.turn or {}).get('input_metadata', {}).get('web_request')),
                 'state_version': meta['version'], 'focus': meta['current_focus'],
                 'active_facts': facts,
                 'decisions': [fact for fact in facts if fact['key'] in {'decision', 'user_decision', '用户决定'}]}
@@ -126,6 +142,14 @@ class ConversationController:
             plan = self.dialogue.classify(state['question'], context)
         if not isinstance(plan, DialoguePlan):
             plan = DialoguePlan.model_validate(plan)
+        if plan.image_ids and not plan.clarification_question and not plan.unsupported_reason:
+            if any(self.store.image_metadata(image_id) is None for image_id in plan.image_ids):
+                plan = plan.model_copy(update={'image_ids': [], 'changes': [], 'needs_analysis': False, 'task': None,
+                    'clarification_question': '未能唯一找到指定图片，请选择会话内的航拍图。'})
+            else:
+                self.store.activate_images(plan.image_ids)
+                self.turn = self.store.set_turn_scope(self.turn['turn_id'], plan.image_ids)
+        plan = DialogueService._resolve_changes(plan, {**context, 'session': self.store.meta()})
         return {'plan': plan.model_dump(), 'context': context}
 
     def _apply(self, state):
@@ -135,7 +159,8 @@ class ConversationController:
         meta = self.store.meta()
         try:
             if plan.changes:
-                self.store.apply_changes(state['turn_id'], [change.model_dump() for change in plan.changes], meta['current_image_id'])
+                self.store.apply_scoped_changes(state['turn_id'], [change.model_dump() for change in plan.changes],
+                    default_image_id=meta['current_image_id'] if len(meta['active_image_ids']) == 1 else None)
             if plan.focus is not None:
                 self.store.update_meta(current_focus=plan.focus)
         except ValueError as exc:
@@ -180,7 +205,8 @@ class ConversationController:
         if not task.focus and meta['current_focus']:
             task = task.model_copy(update={'focus': meta['current_focus']})
         if task.target == 'report' and not task.report_format:
-            task = task.model_copy(update={'report_format': 'html'})
+            from configs.agent_config import REPORT_CONFIG
+            task = task.model_copy(update={'report_format': REPORT_CONFIG.get('format', 'html')})
         pending = meta.get('pending_clarification')
         question = state['question']
         if pending and pending.get('original_request'):
@@ -192,6 +218,17 @@ class ConversationController:
             # 意图节点已经综合历史偏好和本轮要求；不把过去“先不生成”的阶段指令再交给报告正文。
             snapshot['report_requirements'] = {'current_request': question, 'format': task.report_format,
                                                'scope': task.decision_summary}
+        if len(meta['active_image_ids']) > 1:
+            from .group_analysis import GroupAnalysisService
+            group = GroupAnalysisService(self.bridge, self.services)
+            for progress in group.run_stream(self.store, self.turn, meta['active_image_ids'], task, question, snapshot):
+                self._emit(progress['node'], progress['event'], progress['status'], progress.get('summary', ''),
+                           scope='analysis', image_id=progress.get('image_id'), group_id=progress.get('group_id'),
+                           run_id=progress.get('run_id'), item_id=progress.get('item_id'))
+            result = group.last_result
+            if result['status'] == 'completed':
+                self.store.update_meta(pending_clarification=None)
+            return {'analysis_result': result, 'answer': result['final_answer'], 'status': result['status']}
         for progress in self.bridge.run_stream(self.store, self.turn, meta['current_image_id'], meta['current_image_path'],
                                                task, question, snapshot):
             self._emit(progress['node'], progress['event'], progress['status'], progress.get('summary', ''),
@@ -261,7 +298,10 @@ class ConversationController:
             file.write(json.dumps(progress, ensure_ascii=False, allow_nan=False) + '\n')
         return progress
 
-    def stream(self, question, image_path=None, request_id=None, plan_override=None):
+    def stream(self, question, image_path=None, request_id=None, plan_override=None,
+               *, image_paths=None, image_ids=None, attachment_metadata=None):
+        if sum(value is not None for value in (image_path, image_paths, image_ids)) > 1:
+            raise ValueError('image_path/image_paths/image_ids 只能提供一种')
         with self.store.lock():
             # 未取得锁的并发请求不得清空正在执行轮次的临时结果。
             self.last_result = None
@@ -275,6 +315,22 @@ class ConversationController:
             metadata = {'image_path': str(attachment) if attachment else None,
                         'image_sha256': sha256(attachment) if attachment and attachment.is_file() else None,
                         'local_plan': override.model_dump() if override else None}
+            if isinstance(attachment_metadata, dict):
+                metadata['web_request'] = bool(attachment_metadata.get('web_request'))
+            selected_ids = None
+            if image_paths is not None:
+                selected_ids = [image['image_id'] for image in self.store.register_images(image_paths)]
+            elif image_ids is not None:
+                selected_ids = list(image_ids)
+                if any(self.store.image_metadata(image_id) is None for image_id in selected_ids):
+                    raise ValueError('图片不属于当前会话')
+            if selected_ids is not None or len(self.store.meta()['active_image_ids']) > 1:
+                selected_ids = selected_ids if selected_ids is not None else self.store.meta()['active_image_ids']
+                if not selected_ids or len(set(selected_ids)) != len(selected_ids):
+                    raise ValueError('分析图片集合不能为空或重复')
+                metadata.update(image_ids=selected_ids, attachments=[{
+                    'image_id': image_id, 'sha256': self.store.image_metadata(image_id)['sha256']}
+                    for image_id in selected_ids], attachment_metadata=attachment_metadata or [])
             self.turn = self.store.begin_turn(question, request_id=request_id, input_metadata=metadata)
             self._sequence = 0
             if 'answer' in self.turn:
@@ -291,6 +347,9 @@ class ConversationController:
             try:
                 if image_path:
                     self.store.attach_image(image_path)
+                    self._attached = True
+                elif selected_ids is not None:
+                    self.store.activate_images(selected_ids)
                     self._attached = True
                 # closing 负责释放句柄；不能在 sqlite 的事务上下文退出前先关闭连接。
                 with closing(sqlite3.connect(self.store.session_dir / 'checkpoints.sqlite', check_same_thread=False)) as connection:

@@ -81,3 +81,11 @@ agent:
   engine: langgraph        # langgraph | react；ReAct 保留原完整流程
   device: auto             # auto | cuda | cpu
   batch_size: 1
+
+# Web附件先暂存，成功归档到会话inputs后清理；浏览本地图集不上传文件。
+web:
+  max_upload_bytes: 20971520  # 单张20 MiB；修改后重启后端生效
+
+# 同时约束网页单轮附件数量；不改变每张图片的原有分割流程。
+vision:
+  max_input_images: 5

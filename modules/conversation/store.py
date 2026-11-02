@@ -13,6 +13,7 @@ import sqlite3
 import time
 from typing import Any, Iterator
 import uuid
+from .web_store import WebStoreMixin
 
 
 _TZ = timezone(timedelta(hours=8))
@@ -42,7 +43,7 @@ def _atomic_write(path: Path, content: str | bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-class SessionStore:
+class SessionStore(WebStoreMixin):
     """同一会话由控制器持有 lock；每个方法使用短事务和独立连接。"""
 
     def __init__(self, root: str | Path, session_id: str):
@@ -125,7 +126,10 @@ class SessionStore:
 
     def meta(self) -> dict:
         with self._db() as connection:
-            return self._meta(connection)
+            meta = self._meta(connection)
+        # 旧会话在读取时兼容提升，不为了展示历史而重写其数据库和导出。
+        meta.setdefault('active_image_ids', [meta['current_image_id']] if meta.get('current_image_id') else [])
+        return meta
 
     def update_meta(self, **fields: Any) -> dict:
         # 图片必须经 attach_image 验证入库，编号和路径不能由外部随意覆盖。
@@ -297,7 +301,72 @@ class SessionStore:
                 scopes[row['turn_id']] = current
             return {row['id']: scopes.get(row['turn_id']) for row in connection.execute('SELECT id,turn_id FROM messages')}
 
+    def message_image_scopes(self) -> dict[int, list[str]]:
+        """读取轮次的有序集合，旧单图档案继续按附件哈希与分析索引恢复。"""
+        legacy = self.message_image_ids()
+        with self._db() as connection:
+            scopes, current = {}, []
+            for row in connection.execute('SELECT turn_id,payload FROM turns ORDER BY turn_id'):
+                turn = json.loads(row['payload'])
+                metadata = turn.get('input_metadata', {})
+                if 'analysis_image_ids' in turn:
+                    current = turn['analysis_image_ids']
+                elif 'image_ids' in metadata:
+                    current = metadata['image_ids']
+                else:
+                    message = connection.execute('SELECT id FROM messages WHERE turn_id=? LIMIT 1', (row['turn_id'],)).fetchone()
+                    image_id = legacy.get(message['id']) if message else None
+                    current = [image_id] if image_id else current
+                scopes[row['turn_id']] = list(current)
+            return {row['id']: scopes.get(row['turn_id'], []) for row in connection.execute('SELECT id,turn_id FROM messages')}
+
+    def set_turn_scope(self, turn_id, image_ids):
+        """单独记录意图解析后的范围，保留原附件快照以支持严格幂等恢复。"""
+        with self._db() as connection:
+            if any(connection.execute('SELECT 1 FROM images WHERE image_id=?', (image_id,)).fetchone() is None for image_id in image_ids):
+                raise ValueError('分析对象尚未登记')
+            turn = self._turn(connection, turn_id)
+            turn['analysis_image_ids'] = list(image_ids)
+            connection.execute('UPDATE turns SET payload=? WHERE turn_id=?', (_json(turn), turn_id))
+        return turn
+
+    def register_images(self, sources) -> list[dict]:
+        """所有文件先验证再登记；登记和激活分离，防止逐图切换造成范围泄露。"""
+        from PIL import Image
+        normalized = []
+        for source in sources:
+            source = dict(source) if isinstance(source, dict) else {'path': source}
+            source['path'] = Path(source['path']).expanduser().resolve()
+            with Image.open(source['path']) as image:
+                image.verify()
+            normalized.append(source)
+        return [self._register_image(source['path'], source.get('source_name'), source.get('relative_path'))
+                for source in normalized]
+
+    def activate_images(self, image_ids) -> dict:
+        if not isinstance(image_ids, list) or len(set(image_ids)) != len(image_ids):
+            raise ValueError('图片集合必须是无重复的列表')
+        with self._db() as connection:
+            records = []
+            for image_id in image_ids:
+                row = connection.execute('SELECT payload FROM images WHERE image_id=?', (image_id,)).fetchone()
+                if row is None:
+                    raise ValueError('图片尚未登记：' + str(image_id))
+                records.append(json.loads(row[0]))
+            meta = self._meta(connection)
+            if meta.get('active_image_ids') != image_ids:
+                meta.update(active_image_ids=list(image_ids), current_image_id=image_ids[0] if image_ids else None,
+                            current_image_path=records[0]['image_path'] if records else None, version=meta['version'] + 1)
+                self._put_meta(connection, meta)
+        self.export()
+        return self.meta()
+
     def attach_image(self, path: str | Path) -> dict:
+        saved = self._register_image(path)
+        self.activate_images([saved['image_id']])
+        return saved
+
+    def _register_image(self, path, source_name=None, relative_path=None) -> dict:
         from PIL import Image
         import io
         path = Path(path).expanduser().resolve()
@@ -328,21 +397,38 @@ class SessionStore:
                 _atomic_write(destination, data)
                 saved = {"image_id": image_id, "image_path": str(destination), "sha256": digest,
                          # source_name 只用于用户可见显示；内部仍使用 image_id 和 image_path。
-                         "source_path": str(path), "source_name": path.name, "created_at": _now()}
+                         "source_path": str(path), "source_name": source_name or path.name,
+                         "relative_path": relative_path or source_name or path.name, "created_at": _now()}
                 connection.execute("INSERT INTO images VALUES (?, ?, ?)", (image_id, digest, _json(saved)))
-            meta = self._meta(connection)
-            if meta["current_image_id"] != saved["image_id"]:
-                meta.update(current_image_id=saved["image_id"], current_image_path=saved["image_path"])
-                meta["version"] += 1
-                self._put_meta(connection, meta)
         self.export()
         return saved
+
+    @staticmethod
+    def _decode_image_record(payload: str) -> dict:
+        """读取时兼容旧图片字段，不通过数据迁移改写历史证据。"""
+        image = json.loads(payload)
+        if not image.get('source_name'):
+            # 旧 CLI 会话仅保存源路径；优先恢复原文件名，避免显示归档用的 original.jpg。
+            source = image.get('source_path') or image.get('image_path') or ''
+            image['source_name'] = Path(source.replace('\\', '/')).name or image['image_id']
+        if not image.get('relative_path'):
+            # 旧记录无法还原用户选择的目录结构，只使用已知名称，不推测相对子目录。
+            image['relative_path'] = image['source_name']
+        return image
 
     def image_metadata(self, image_id: str) -> dict | None:
         """读取图片元数据，供控制器向分析图传递稳定的源文件显示名。"""
         with self._db() as connection:
             row = connection.execute("SELECT payload FROM images WHERE image_id=?", (image_id,)).fetchone()
-        return json.loads(row[0]) if row is not None else None
+        return self._decode_image_record(row[0]) if row is not None else None
+
+    def images(self) -> list[dict]:
+        with self._db() as connection:
+            return [self._decode_image_record(row[0]) for row in connection.execute('SELECT payload FROM images ORDER BY image_id')]
+
+    def turns(self) -> list[dict]:
+        with self._db() as connection:
+            return [json.loads(row[0]) for row in connection.execute('SELECT payload FROM turns ORDER BY turn_id')]
 
     def facts(self, active_only: bool = True, image_id: str | None = None) -> list[dict]:
         with self._db() as connection:
@@ -351,6 +437,10 @@ class SessionStore:
                 and (image_id is None or fact["scope"] == "session" or fact["image_id"] == image_id)]
 
     def apply_changes(self, turn_id: str, changes: list[dict], image_id: str | None = None) -> list[dict]:
+        # 旧接口提升为带范围变更，仍在同一事务内保留整轮幂等与回滚。
+        return self.apply_scoped_changes(turn_id, changes, default_image_id=image_id)
+
+    def apply_scoped_changes(self, turn_id: str, changes: list[dict], default_image_id=None) -> list[dict]:
         if not isinstance(changes, list):
             raise ValueError("事实变更必须是列表")
         with self._db() as connection:
@@ -358,13 +448,9 @@ class SessionStore:
             operation = connection.execute("SELECT payload FROM operations WHERE turn_id=?", (turn_id,)).fetchone()
             if operation is not None:
                 return json.loads(operation[0])
-            if image_id is not None and connection.execute(
-                "SELECT 1 FROM images WHERE image_id=?", (image_id,)
-            ).fetchone() is None:
-                raise ValueError("图片尚未登记")
             output, changed = [], False
             for index, raw in enumerate(changes, 1):
-                allowed = {"operation", "key", "value", "unit", "location", "scope", "supersedes_fact_id", "verification", "observed_at"}
+                allowed = {"operation", "key", "value", "unit", "location", "scope", "supersedes_fact_id", "verification", "observed_at", "image_id"}
                 if not isinstance(raw, dict) or set(raw) - allowed:
                     raise ValueError("事实变更字段非法")
                 if raw.get("operation") not in {"add", "correct"}:
@@ -372,6 +458,11 @@ class SessionStore:
                 if any(not isinstance(raw.get(key), str) or not raw[key].strip() for key in ("key", "value")):
                     raise ValueError("事实必须包含非空 key/value")
                 scope = raw.get("scope", "image")
+                image_id = raw.get('image_id') or default_image_id
+                if scope == 'session' and raw.get('image_id'):
+                    raise ValueError('共享事实不能指定图片')
+                if image_id and connection.execute('SELECT 1 FROM images WHERE image_id=?', (image_id,)).fetchone() is None:
+                    raise ValueError('图片尚未登记')
                 if scope not in {"image", "session"} or (scope == "image" and not image_id):
                     raise ValueError("图片事实缺少图片范围，需要先澄清")
                 verification = raw.get("verification", "user_reported")
@@ -468,6 +559,11 @@ class SessionStore:
             return [json.loads(row[0]) for row in connection.execute(
                 "SELECT payload FROM analyses WHERE image_id IS ? ORDER BY id DESC", (image_id,)
             )]
+
+    def register_group(self, turn_id, result):
+        with self._db() as connection:
+            connection.execute('CREATE TABLE IF NOT EXISTS group_analyses (turn_id TEXT PRIMARY KEY, payload TEXT NOT NULL)')
+            connection.execute('INSERT OR REPLACE INTO group_analyses VALUES (?, ?)', (turn_id, _json(result)))
 
     def export(self) -> None:
         # 单次读快照保证各导出来自同一数据库版本；失败后仍可再次重建。

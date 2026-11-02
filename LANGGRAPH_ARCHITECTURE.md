@@ -2,7 +2,7 @@
 
 编制日期：2026-11-01。当前代码已合入 `main`；本文记录当前实现、架构约束和验收结果。
 
-文档状态：LangGraph 单轮分析图、外层多轮会话图和兼容 ReAct 入口均已实施。下方保留实施核对过程和实际发现的问题；新增多轮会话层见 [MULTITURN_ARCHITECTURE.md](MULTITURN_ARCHITECTURE.md)，本图作为内层分析图继续使用。
+文档状态：LangGraph 单轮分析图、外层多轮会话图和兼容 ReAct 入口均已实施。2026-11-02 新增 Web 适配与外层多图编排，执行和验收状态以 [WEB_DEVELOPMENT_PLAN.md](WEB_DEVELOPMENT_PLAN.md) 为准。下方保留原实施核对和历史验收；多轮层见 [MULTITURN_ARCHITECTURE.md](MULTITURN_ARCHITECTURE.md)，本图作为内层单图分析图继续使用。
 
 多轮报告补充：外层负责自动压缩历史，并传入有效事实、相关方案及原消息引用；这些进入分析/报告依赖签名。内层沿原有分割、统计、评分、综合分析、报告节点执行，历史助手建议不能升级为现场事实或用户决定。
 
@@ -16,7 +16,7 @@
 - 单次运行只处理本轮请求。保留批量输入，每张图片独立分析，不跨图汇总或排名。
 - 通过 LangGraph 原生流式机制输出执行进度。第一阶段不要求 LLM 正文逐 token 流式输出。
 - 统一产物根目录为英文 `output/artifacts/`，每次运行使用独立文件夹；ReAct 也遵守相同归档规范。
-- 本文描述的内层分析图不管理会话记忆。新增外层会话图使用 SQLite 与 Checkpointer，产物写入 message/<session_id>/turns/；单轮入口仍使用 output/artifacts/。内层显式关闭 Checkpointer，不持久化真实数组；网页和内层节点精确续跑仍不实现。
+- 本文描述的内层分析图不管理会话记忆。外层会话图使用 SQLite 与 Checkpointer，产物写入 message/<session_id>/turns/；单轮入口仍使用 output/artifacts/。Web 在外层串行调用本图处理各张图片，再组织有来源的综合研判；不改变本图的算法和评分。内层显式关闭 Checkpointer，不持久化真实数组，不提供模型内部精确续跑。
 - 保留原始掩膜的统计口径、共享配色、最近邻掩膜缩放和图片坐标映射，不改动训练算法与优先级公式。
 - 新增或修改的关键代码使用中文注释；测试脚本、验收日志和示例产物继续放在用户指定的项目外可写目录。
 
@@ -224,7 +224,7 @@ manifest 至少包含 schema_version、run/item 标识、引擎、问题摘要�
 
 历史报告已经归档到 `output/artifacts/legacy_reports/`，并保留迁移清单与哈希校验。既有 `output/artifacts/`、checkpoints 和训练/推理输出不混入新任务或冒充新结构；不搬迁其他无关数据。
 
-多轮会话已经建立独立的 SQLite 记忆、事实更正、摘要和历史列表入口；网页界面、检索索引和多人并发写入仍不在当前范围内。
+多轮会话已经建立 SQLite 记忆、事实更正、摘要和历史列表入口；2026-11-02 的网页入口沿用这些能力。检索索引和多人并发写入不在首版范围；Web 开发验收与旧 CLI 验收分开记录。
 
 ## 10. 配置与路径兼容
 

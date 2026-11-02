@@ -125,6 +125,8 @@ class AnalysisBridge:
         artifacts = ArtifactStore(Path(turn['turn_dir']) / 'artifacts', 'langgraph', question)
         image_metadata = store.image_metadata(image_id) or {}
         source_name = image_metadata.get('source_name')
+        # 网页命名来自归档前的原始文件名，不能使用服务端 original.jpg。
+        source_name = conversation_context.get('source_name') or source_name
         item = artifacts.create_item(image_path, source_name=source_name)
         contexts = self.contexts(image_path, task, question, conversation_context)
         state = {'image_path': image_path, 'source_name': source_name, 'task': task.model_dump(), 'required_stages': required_stages(task),
@@ -167,6 +169,11 @@ class AnalysisBridge:
         controller = LangGraphController(self.services, item)
         context = {'image_path': image_path, 'task_override': task.model_dump(), 'restored_state': state,
                    'dependency_context': contexts, 'conversation_context': conversation_context}
+        if conversation_context.get('web_request') and task.target == 'report':
+            from modules.agent.report_naming import build_individual_report_name
+            report_name = build_individual_report_name(source_name, image_id, task.report_format or 'html',
+                conversation_context.get('report_source_names', [source_name]))
+            context['output_filename'] = Path(report_name['filename']).stem
         for progress in controller.stream(question, context):
             yield progress
         self.last_result = controller.last_result

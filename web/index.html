@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RescueNet · 灾情分析</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script defer src="/static/vendor/marked.umd.js"></script>
+  <script defer src="/static/vendor/purify.min.js"></script>
+  <script type="module" src="/static/js/app.js"></script>
+</head>
+<body>
+  <!-- 三个区域独立滚动；对话与当前图片集合由同一个会话状态驱动。 -->
+  <div class="shell" id="shell">
+    <aside class="sidebar" id="sidebar" aria-label="会话与航拍图集">
+      <div class="brand"><span class="brand-mark">R<span>+</span></span><div><strong>RescueNet</strong><small>灾情影像分析</small></div><button class="icon-button mobile-only" id="close-sidebar" aria-label="收起侧栏">×</button></div>
+      <button class="new-session" id="new-session"><span>＋</span> 新建分析会话 <kbd>新建</kbd></button>
+      <section class="history-section">
+        <div class="section-label"><span>分析会话</span><span class="muted" id="session-count">0</span></div>
+        <label class="search"><span>⌕</span><input id="history-search" placeholder="搜索会话时间" aria-label="搜索会话时间"></label>
+        <nav id="history-list" aria-label="历史分析会话"><p class="subtle-empty">暂无历史会话</p></nav>
+        <button class="text-button hidden" id="more-sessions">加载更多会话</button>
+      </section>
+      <div class="sidebar-resizer" id="sidebar-resizer" role="separator" aria-label="调整历史与图集高度" tabindex="0"></div>
+      <section class="gallery-section">
+        <div class="section-label"><span>灾情航拍图集</span><span class="muted" id="gallery-count">本地</span></div>
+        <button class="folder-button" id="choose-folder"><span>▱</span> 选择本地文件夹</button>
+        <input id="folder-input" type="file" webkitdirectory multiple hidden>
+        <input id="files-input" type="file" accept=".jpg,.jpeg,.png,.bmp" multiple hidden>
+        <p class="folder-name muted" id="folder-name">选中图片会在发送时上传</p>
+        <label class="search hidden" id="gallery-search-wrap"><span>⌕</span><input id="gallery-search" placeholder="搜索图片名称" aria-label="搜索航拍图片"></label>
+        <div class="gallery-scroll" id="gallery-scroll"><div class="gallery-grid" id="gallery-grid"></div><div class="gallery-empty" id="gallery-empty"><span class="empty-image">▧</span><p>让灾情影像触手可及</p><small>选择文件夹，浏览并勾选航拍图<br>支持 JPG、PNG、BMP</small></div></div>
+        <div class="gallery-actions hidden" id="gallery-actions"><span id="selected-count">已选择 0 张</span><button class="text-button" id="clear-selection">清空</button><button class="small-primary" id="add-selection">添加到对话</button></div>
+      </section>
+      <footer class="sidebar-footer"><button class="settings-button" id="open-settings"><span>⚙</span> 设置</button><span class="local-tag"><i></i> 本地工作区</span></footer>
+    </aside>
+
+    <main class="conversation">
+      <header class="conversation-header"><button class="icon-button" id="toggle-sidebar" title="显示或收起侧栏" aria-label="显示或收起侧栏">☰</button><div class="conversation-heading"><strong id="session-title">灾情分析工作区</strong><span id="active-images">选择航拍图，开始一次研判</span></div><div class="header-spacer"></div><span class="model-chip" id="model-chip">LangGraph</span><button class="icon-button" id="toggle-resources" title="显示或收起会话资源" aria-label="显示或收起会话资源">▥</button></header>
+      <div class="message-scroll" id="message-scroll">
+        <section class="welcome" id="welcome"><div class="welcome-mark"><svg viewBox="0 0 64 64" fill="none" aria-hidden="true"><path d="M10 46L27 18l11 18 7-11 10 21H10Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M10 51h45M24 24l7 4 5-2" stroke="currentColor" stroke-width="2"/><circle cx="48" cy="14" r="5" stroke="currentColor" stroke-width="2"/></svg></div><span class="eyebrow">航拍影像 · 灾情研判</span><h1>从一张航拍图，了解现场。</h1><p>查看建筑损坏、道路阻塞与灾情分布。<br>结合现场信息，让每一份研判都有依据。</p><div class="suggestions"><button data-prompt="统计所选图像中的建筑损坏和道路阻塞像素占比。"><span>▧</span><strong>了解灾情分布</strong><small>分割图像，查看类别像素统计</small><b>↗</b></button><button data-prompt="结合所选图像分析灾情，并根据我补充的现场资源提出救援建议。"><span>⌁</span><strong>开展应急研判</strong><small>结合现场信息，讨论救援建议</small><b>↗</b></button><button data-prompt="分析所选灾情图像，生成HTML灾情分析报告。"><span>▤</span><strong>形成分析报告</strong><small>汇集分析图像、结果与研判依据</small><b>↗</b></button></div></section>
+        <div class="messages" id="messages" aria-live="polite"></div>
+      </div>
+      <button class="new-message hidden" id="new-message">↓ 查看新消息</button>
+      <section class="composer-region"><div class="job-panel hidden" id="job-panel"><div class="job-summary"><span class="status-dot"></span><span id="job-label">任务处理中</span><button class="text-button" id="toggle-progress">查看过程</button></div><ol class="progress-log hidden" id="progress-log"></ol></div><div class="composer" id="composer"><div class="attachments hidden" id="attachments"></div><textarea id="question" rows="2" placeholder="描述分析需求，或补充现场人数、车辆等信息…" aria-label="分析需求"></textarea><div class="composer-toolbar"><button class="icon-button" id="attach-images" aria-label="添加本地航拍图片" title="添加航拍图片">＋</button><span class="composer-hint" id="composer-scope">支持单图与多图共同分析</span><button class="send-button" id="send-message" aria-label="发送分析需求">↑</button></div></div><p class="composer-note">研判基于影像与已提供信息；重要现场情况仍需核实。<span>Enter 发送 · Shift + Enter 换行</span></p></section>
+    </main>
+
+    <aside class="resources-panel" id="resources-panel" aria-label="当前会话资源"><header class="resources-header"><strong>会话资源</strong><button class="icon-button" id="close-resources" aria-label="收起会话资源">›</button></header><p class="resource-description">当前会话的影像与分析成果</p><div class="resource-tabs" role="tablist"><button class="active" data-kind="images" role="tab" aria-selected="true">图片 <span id="count-images">0</span></button><button data-kind="reports" role="tab" aria-selected="false">报告 <span id="count-reports">0</span></button><button data-kind="data" role="tab" aria-selected="false">数据 <span id="count-data">0</span></button></div><div class="resource-filters"><select id="resource-turn" aria-label="筛选资源轮次"><option value="">全部轮次</option></select><select id="resource-image" aria-label="筛选资源图片或组"><option value="">全部图片</option></select></div><div id="resource-list" class="resource-list"><div class="resource-empty"><span>▧</span><strong>分析成果将在这里呈现</strong><p>发送航拍图并提出需求后<br>查看图像、报告与数据</p></div></div><div class="resources-footer">按轮次归档 · 历史成果保留</div></aside>
+  </div>
+  <div class="toast hidden" id="toast" role="status"></div>
+  <dialog class="preview-dialog" id="preview-dialog"><header><strong id="preview-title">资源预览</strong><button class="icon-button" id="close-preview" aria-label="关闭预览">×</button></header><div class="preview-tabs" id="preview-tabs"></div><div class="preview-body" id="preview-body"></div><div class="legend hidden" id="preview-legend"></div><footer><span class="muted" id="preview-caption"></span><a class="small-primary" id="preview-download" download>下载文件</a></footer></dialog>
+  <dialog class="settings-dialog" id="settings-dialog"><header><div><strong>设置</strong><small>管理灾情分析服务的配置</small></div><button class="icon-button" id="close-settings" aria-label="关闭设置">×</button></header><div class="settings-notice" id="settings-notice">配置保存后，重启后端生效。</div><form id="settings-form"></form><footer><span class="muted" id="settings-status"></span><button class="small-primary" id="save-settings">保存设置</button></footer></dialog>
+</body>
+</html>

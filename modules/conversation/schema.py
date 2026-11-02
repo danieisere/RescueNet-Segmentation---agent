@@ -15,6 +15,7 @@ class FactChange(BaseModel):
     unit: str = ''
     location: str = ''
     scope: Literal['image', 'session'] = 'image'
+    image_id: str | None = None
     supersedes_fact_id: str | None = None
     verification: Literal['user_reported', 'confirmed', 'unverified'] = 'user_reported'
     observed_at: str = ''
@@ -25,6 +26,8 @@ class FactChange(BaseModel):
             raise ValueError('事实键与内容不能为空白')
         if self.operation == 'add' and self.supersedes_fact_id is not None:
             raise ValueError('新增事实不能指定被替代事实')
+        if self.scope == 'session' and self.image_id is not None:
+            raise ValueError('会话共享事实不能指定单图范围')
         return self
 
 
@@ -41,6 +44,8 @@ class DialoguePlan(BaseModel):
     clarification_question: str = ''
     unsupported_reason: str = ''
     decision_summary: str = ''
+    # 空列表表示沿用当前集合；显式引用只允许在控制器中解析为已登记图片。
+    image_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode='after')
     def check_routing(self):
@@ -66,6 +71,18 @@ class DiscussedPlan(BaseModel):
     content: str = Field(min_length=1)
     source_message_ids: list[int] = Field(min_length=1)
     image_id: str | None = None
+    image_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def normalize_scope(self):
+        # 读取旧摘要时提升单图范围，避免丢失历史方案的图片归属。
+        if not self.image_ids and self.image_id:
+            self.image_ids = [self.image_id]
+        if len(set(self.image_ids)) != len(self.image_ids):
+            raise ValueError('方案图片范围不能重复')
+        if self.image_id and self.image_ids and self.image_id not in self.image_ids:
+            raise ValueError('新旧方案图片范围冲突')
+        return self
 
 
 class HistorySummary(BaseModel):
